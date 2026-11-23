@@ -1,0 +1,12 @@
+torch>=2.1
+transformers>=4.40
+datasets>=2.18
+huggingface_hub>=0.23
+soundfile>=0.12
+librosa>=0.10
+scipy
+numpy
+pandas
+tqdm
+pyarrow
+pytest
