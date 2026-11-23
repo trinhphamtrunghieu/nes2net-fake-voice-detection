@@ -8,6 +8,7 @@ chạy được trên Kaggle.
 | | |
 |---|---|
 | 📓 Kaggle notebook | [`notebooks/nes2net_kaggle.ipynb`](notebooks/nes2net_kaggle.ipynb) · [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net_kaggle.ipynb) |
+| 📓 Colab notebook | [`notebooks/nes2net_colab.ipynb`](notebooks/nes2net_colab.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net_colab.ipynb) |
 | 🤗 Demo | [HF Space](https://huggingface.co/spaces/trinhphamtrunghieu/nes2net-fake-voice-detection) · code trong `space/` |
 | 📄 Tóm tắt paper | [`docs/paper_summary.md`](docs/paper_summary.md) |
 | 🔬 Ablation, research gap, đề xuất | [`docs/ablation_and_gaps.md`](docs/ablation_and_gaps.md) |
@@ -51,6 +52,18 @@ score = m(wave_4s_16k[None])[:, 1]     # cao hơn = bona fide
 1. Bấm badge *Open in Kaggle* ở trên (hoặc *File → Import Notebook* → dán URL của `notebooks/nes2net_kaggle.ipynb`).
 2. Settings: **GPU T4/P100**, **Internet On**.
 3. Chỉnh `RUN_A / RUN_B / RUN_C` trong ô Config → *Save & Run All*.
+
+## Google Colab
+1. Bấm badge *Open In Colab* ở trên → *Runtime → Change runtime type → GPU*.
+2. Chạy ô Setup: cho phép **mount Google Drive**. Kết quả, checkpoint và trạng thái resume nằm ở
+   `MyDrive/nes2net`; dữ liệu và cache nằm ở `/content` (tự tải lại mỗi phiên).
+3. Chỉnh `RUN_A / RUN_B / RUN_C` → *Runtime → Run all*.
+4. Phần B (train end-to-end) chạy theo từng phiên (`time_budget_h=3.5`) và lưu `last_state.pth` mỗi 300 bước. Khi
+   Colab ngắt kết nối, chỉ cần chạy lại notebook là train tiếp. Mặc định giữ 3 checkpoint tốt nhất (~8 GB trên
+   Drive; Drive free có 15 GB).
+
+Hai notebook được sinh từ cùng một nguồn (`notebooks/build_notebook.py` + `notebooks/_cells.py`); sửa ở đó rồi
+chạy `python notebooks/build_notebook.py`.
 
 ## Demo HF Space
 Workflow `.github/workflows/deploy_space.yml` tự tạo hoặc cập nhật Space mỗi lần push vào `main` (cần

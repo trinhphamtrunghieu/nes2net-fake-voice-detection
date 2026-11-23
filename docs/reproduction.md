@@ -26,6 +26,9 @@
   tức ~60 giờ GPU, vượt xa một phiên Kaggle 12 giờ.
 * **Kaggle budget (Notebook B):** `lr=1e-6`, dừng sau 8.3 giờ (~12–15 epoch), dev 6,000 câu, trung bình top-3.
   `lr=1e-6` là giá trị dùng cho wav2vec2-AASIST (SSL_Anti-spoofing) và cho bản CtrSVDD của chính tác giả.
+* **Colab (Notebook `nes2net_colab.ipynb`):** `time_budget_h=3.5` mỗi phiên, dev 4,000 câu, resume từ Google Drive
+  (`engine.train(resume=True, save_every_steps=300, keep_best_k=3)`). Colab free chỉ có 2 CPU, nên RawBoost trên
+  CPU là nút cổ chai và epoch chậm hơn Kaggle.
 * Đây **không** phải tái lập số liệu đầy đủ. Để so với bảng của paper, hãy dùng phần A (checkpoint chính thức)
   hoặc chạy `scripts/train.py --lr 2.5e-7 --epochs 100` trên GPU riêng.
 
