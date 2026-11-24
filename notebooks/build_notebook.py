@@ -36,7 +36,7 @@ một phiên, B trong phiên riêng. Nếu B bị dừng giữa chừng, chạy 
 """,
   setup=r"""
 import os, subprocess, sys
-REPO_DIR = os.path.abspath('nes2net-fake-voice-detection')
+REPO_DIR = '/tmp/nes2net-fake-voice-detection'   # ngoài /kaggle/working để không bị đóng gói vào output
 """,
   paths=r"""
 WORK = '/kaggle/working'            # được lưu lại sau phiên (tối đa ~20 GB)
@@ -101,7 +101,29 @@ C_LAYER_N = dict(train=2500, dev=1000, itw=2000)
 }
 
 
-def build(platform: str):
+SMOKE_CELL = r"""
+SMOKE = True
+RUN_A = RUN_B = RUN_C = True
+A_SETS = {
+    'ITW@600 (4s)':              ('hfbench:InTheWild@600', False),
+    'ASVspoof2019 LA eval@600':  ('asv19:test@600', False),
+    'DF phase=eval (1 shard)@600': ('hfbench:ASVspoof2021_DF:1:eval@600', False),
+}
+A_ITW_FULL = False
+B = dict(lr=1e-6, bs=8, epochs=2, algo=4, time_budget_h=0.25, dev='asv19:validation@200', avg_k=1,
+         keep_best_k=1, save_every_steps=20)
+B_EVAL = True
+B_TRAIN = 'asv19:train@400'
+B_EVAL_SETS = [('LA19 eval@300', 'asv19:test@300'), ('ITW@300', 'hfbench:InTheWild@300')]
+C = dict(train='asv19:train@600', dev='asv19:validation@300', evals=['asv19:test@300', 'hfbench:InTheWild@300'],
+         layers=[24], seeds=[0], epochs=3, groups=['A0_baselines', 'A5_connections'])
+C_LAYER_STUDY = True
+C_LAYER_N = dict(train=300, dev=150, itw=200)
+print('SMOKE settings active')
+"""
+
+
+def build(platform: str, smoke: bool = False, out: str | None = None):
     P = PLATFORM[platform]
     C = []
     md = lambda s: C.append(nbf.v4.new_markdown_cell(s.strip()))
@@ -139,13 +161,16 @@ import torch, json, numpy as np, pandas as pd
 DEV = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(DEV, torch.cuda.get_device_name(0) if DEV == 'cuda' else '', '| WORK =', WORK, '| workers =', NW)
 """)
+    if smoke:
+        md("### ⚡ SMOKE RUN — tập con rất nhỏ, chỉ để kiểm tra toàn bộ pipeline chạy được (không dùng số liệu này)")
+        code(SMOKE_CELL)
     exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '_cells.py')).read(),
          {'md': md, 'code': code, 'PLATFORM_NAME': platform})
     nb = nbf.v4.new_notebook()
     nb['cells'] = C
     nb['metadata'] = {'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
                       'language_info': {'name': 'python'}, **P['meta']}
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'nes2net_{platform}.ipynb')
+    out = out or os.path.join(os.path.dirname(os.path.abspath(__file__)), f'nes2net_{platform}.ipynb')
     nbf.write(nb, out)
     print('wrote', out)
 
@@ -153,3 +178,5 @@ print(DEV, torch.cuda.get_device_name(0) if DEV == 'cuda' else '', '| WORK =', W
 if __name__ == '__main__':
     for plat in PLATFORM:
         build(plat)
+    build('kaggle', smoke=True, out=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'kaggle',
+                                                 'nes2net_kaggle_smoke.ipynb'))

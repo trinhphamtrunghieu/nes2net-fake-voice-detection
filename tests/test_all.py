@@ -76,6 +76,7 @@ def test_fairseq_conversion_roundtrip():
     fair = {'ssl_model.model.' + k: v for k, v in
             _fake_fairseq_keys({k[16:]: v for k, v in ref.items() if k.startswith('ssl_model.model.')}).items()}
     fair.update({'module.' + k: v for k, v in ref.items() if k.startswith('Nested')})
+    fair['ssl_model.model.mask_emb'] = torch.randn(64)      # present in real fairseq ckpts
     conv = convert_official_state_dict(fair, model)
     missing, unexpected = model.load_state_dict(conv, strict=False)
     assert not missing and not unexpected

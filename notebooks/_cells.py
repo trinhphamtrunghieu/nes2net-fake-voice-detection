@@ -1,7 +1,7 @@
 # Shared experiment cells (exec-ed by build_notebook.py with md/code/WORKDIR_NOTE defined).
 md("## 0. Kiểm tra nhanh: back-end khớp bit-for-bit với code gốc, số tham số ≈ 511k")
 code(r"""
-r = subprocess.run([sys.executable, '-m', 'pytest', '-q', os.path.join(REPO_DIR, 'tests/test_all.py')], capture_output=True, text=True)
+r = subprocess.run([sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', os.path.join(REPO_DIR, 'tests/test_all.py')], capture_output=True, text=True)
 print(r.stdout[-1500:])
 from nes2net.backend import build_backend, count_params, count_macs
 for n in ['nes2net', 'nes2net_x', 'dr_res2net']:
@@ -77,7 +77,7 @@ if RUN_B:
     from nes2net import engine
     engine.set_seed(12345)
     model = SSLNes2Net('facebook/wav2vec2-xls-r-300m', backend='nes2net_x', gradient_checkpointing=True)
-    tr, dv = get_items('asv19:train'), get_items(B['dev'])
+    tr, dv = get_items(globals().get('B_TRAIN', 'asv19:train')), get_items(B['dev'])
     out = f'{WORK}/runB'
     hist = engine.train(model, tr, dv, out, epochs=B['epochs'], lr=B['lr'], bs=B['bs'], algo=B['algo'],
                         device=DEV, amp=True, workers=NW, time_budget_h=B['time_budget_h'],
@@ -88,8 +88,8 @@ if RUN_B and B_EVAL:
     assert best, 'chưa có epoch nào hoàn tất — chạy tiếp phần train trước'
     engine.average_checkpoints(model, [f'{out}/epoch_{e}.pth' for e in best], f'{out}/avg.pth')
     model.to(DEV)
-    for name, spec in [('ASVspoof2019 LA eval', 'asv19:test'), ('ITW', 'hfbench:InTheWild'),
-                       ('DF eval-phase 10 shards', 'hfbench:ASVspoof2021_DF:10:eval')]:
+    for name, spec in globals().get('B_EVAL_SETS', [('ASVspoof2019 LA eval', 'asv19:test'), ('ITW', 'hfbench:InTheWild'),
+                                                    ('DF eval-phase 10 shards', 'hfbench:ASVspoof2021_DF:10:eval')]):
         items = get_items(spec); s = engine.score(model, items, device=DEV, workers=NW, desc=name)
         r = engine.evaluate_scores(s, items); print(name, round(r['eer'], 2)); RESULTS['B ' + name] = r
     json.dump(RESULTS, open(f'{WORK}/partB_results.json', 'w'), indent=1)

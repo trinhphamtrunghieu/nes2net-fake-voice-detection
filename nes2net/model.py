@@ -109,7 +109,9 @@ def convert_official_state_dict(sd: dict, model: SSLNes2Net) -> dict:
     for k, v in sd.items():
         if k.startswith('ssl_model.model.'):
             nk = fairseq_key_to_hf(k[len('ssl_model.model.'):], pc)
-            if nk is not None:
+            # mask_emb is only used for pre-training masking; HF omits masked_spec_embed when
+            # mask_time_prob == mask_feature_prob == 0 (our setting), so drop it in that case.
+            if nk is not None and (nk != 'masked_spec_embed' or nk in hf_keys):
                 out['ssl_model.model.' + nk] = v
         else:
             out[k] = v

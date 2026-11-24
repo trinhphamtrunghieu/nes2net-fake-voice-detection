@@ -88,3 +88,13 @@ checkpoint và bộ parquet đánh giá do [SpeechAntiSpoofingBenchmarks](https:
   title={Nes2Net: A Lightweight Nested Architecture for Foundation Model Driven Speech Anti-Spoofing},
   year={2025}, volume={20}, pages={12005-12018}, doi={10.1109/TIFS.2025.3626963}}
 ```
+
+## Kaggle smoke run (kiểm tra pipeline nhanh, ~30–45 phút)
+`kaggle/nes2net_kaggle_smoke.ipynb` chạy cả 3 phần A/B/C trên tập con rất nhỏ (vài trăm câu), chỉ để xác nhận
+code chạy được trên Kaggle GPU. Số liệu của nó không có giá trị so sánh.
+```bash
+sed -i "s/__KAGGLE_USER__/<kaggle-username>/" kaggle/kernel-metadata.json
+kaggle kernels push -p kaggle --accelerator NvidiaTeslaT4
+kaggle kernels status <kaggle-username>/nes2net-smoke-run
+kaggle kernels output <kaggle-username>/nes2net-smoke-run -p kaggle_out
+```
