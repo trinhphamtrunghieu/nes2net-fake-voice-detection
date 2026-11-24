@@ -82,3 +82,24 @@ def test_resume_and_prune(tmp_path):
     assert len(h2) == 3
     kept = [f for f in os.listdir(out) if f.startswith('epoch_')]
     assert 1 <= len(kept) <= 2               # keep_best_k=1 for each of the two val criteria
+
+
+def test_full_eval_shardwise(tmp_path, monkeypatch):
+    import shutil
+    from nes2net import full_eval, datasets_zoo
+    src = _fake_bench(str(tmp_path))
+    monkeypatch.setattr(full_eval, 'hfbench_files', lambda repo: ['data/test-00000.parquet', 'data/test-00001.parquet'])
+    import huggingface_hub
+    def fake_dl(repo, file, repo_type=None, local_dir=None):
+        os.makedirs(local_dir, exist_ok=True); dst = os.path.join(local_dir, os.path.basename(file))
+        shutil.copy(src, dst); return dst
+    monkeypatch.setattr(huggingface_hub, 'hf_hub_download', fake_dl)
+    m = _tiny_model().eval()
+    out = str(tmp_path / 'fe')
+    res = full_eval.score_hfbench_full(m, 'X/Fake', out, device='cpu', bs=4, workers=0,
+                                       shard_dir=str(tmp_path / 'sh'))
+    assert res['all_trials']['n'] == 16 and res['phase_eval']['n'] == 12   # keys repeat across the 2 fake shards
+    assert not os.listdir(tmp_path / 'sh')                                  # shards deleted after scoring
+    res2 = full_eval.score_hfbench_full(m, 'X/Fake', out, device='cpu', bs=4, workers=0,
+                                        shard_dir=str(tmp_path / 'sh'))      # resumable: nothing rescored
+    assert res2['all_trials']['n'] == 16

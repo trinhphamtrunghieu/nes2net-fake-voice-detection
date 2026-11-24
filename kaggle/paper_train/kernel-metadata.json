@@ -1,0 +1,15 @@
+{
+  "id": "hieutrinh123/nes2net-paper-train",
+  "title": "Nes2Net paper train",
+  "code_file": "nes2net_paper_train.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

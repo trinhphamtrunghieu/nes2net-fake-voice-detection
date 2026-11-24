@@ -123,12 +123,13 @@ print('SMOKE settings active')
 """
 
 
-def build(platform: str, smoke: bool = False, out: str | None = None):
+def build(platform: str, smoke: bool = False, out: str | None = None, override: str | None = None,
+          pre_cells: list | None = None, title_suffix: str = ''):
     P = PLATFORM[platform]
     C = []
     md = lambda s: C.append(nbf.v4.new_markdown_cell(s.strip()))
     code = lambda s: C.append(nbf.v4.new_code_cell(s.strip()))
-    md('# ' + P['title'] + '\n' + INTRO + P['howto'])
+    md('# ' + P['title'] + title_suffix + '\n' + INTRO + P['howto'])
     code(P['setup'] + f"""
 REPO_URL = "{REPO_URL}"
 if not os.path.exists(REPO_DIR):
@@ -161,6 +162,11 @@ import torch, json, numpy as np, pandas as pd
 DEV = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(DEV, torch.cuda.get_device_name(0) if DEV == 'cuda' else '', '| WORK =', WORK, '| workers =', NW)
 """)
+    if override:
+        md('### Cấu hình của lần chạy này (ghi đè ô Config)')
+        code(override)
+    for kind, src in (pre_cells or []):
+        (md if kind == 'md' else code)(src)
     if smoke:
         md("### ⚡ SMOKE RUN — tập con rất nhỏ, chỉ để kiểm tra toàn bộ pipeline chạy được (không dùng số liệu này)")
         code(SMOKE_CELL)
@@ -175,8 +181,95 @@ print(DEV, torch.cuda.get_device_name(0) if DEV == 'cuda' else '', '| WORK =', W
     print('wrote', out)
 
 
+FULL_EVAL_OVERRIDE = r"""
+RUN_A = False      # phần A chung bị thay bằng ô đánh giá đầy đủ bên dưới
+RUN_B = False
+RUN_C = True       # ablation đầy đủ (Kaggle defaults: 6k/2k/4k câu, 3 seed, mọi nhóm + chọn layer)
+"""
+
+FULL_EVAL_CELLS = [('md', r"""
+## A (đầy đủ). Checkpoint chính thức trên TOÀN BỘ các tập test
+Giao thức như code gốc: cửa sổ 4 s đầu (64,600 mẫu, lặp nếu ngắn). ITW chấm thêm cả câu (`--test_protocol full`).
+ASVspoof 2021 LA/DF được chấm theo từng shard (giới hạn đĩa), báo EER trên **phase = eval** (script chấm chính
+thức, so với paper) và trên **toàn bộ trial** (so với Arena), kèm EER theo codec / vocoder.
+"""), ('code', r"""
+from huggingface_hub import hf_hub_download
+from nes2net.model import load_official_checkpoint
+from nes2net.datasets_zoo import get_items
+from nes2net.full_eval import score_hfbench_full
+from nes2net import engine
+import time
+ck = hf_hub_download('SpeechAntiSpoofingBenchmarks/Nes2Net', 'nes2net_x_DF1.65.pth')
+model = load_official_checkpoint(ck).to(DEV); print('official Nes2Net-X loaded (strict)')
+FULL, AF = {}, f'{WORK}/A_full'; os.makedirs(AF, exist_ok=True)
+def save():
+    json.dump(FULL, open(f'{WORK}/partA_full_results.json', 'w'), indent=1)
+t = time.time(); items = get_items('asv19:test')
+s = engine.score(model, items, bs=32, device=DEV, workers=NW, desc='LA19 eval')
+engine.write_scores(s, f'{AF}/ASVspoof2019_LA_eval_scores.txt')
+FULL['ASVspoof2019 LA eval (4s)'] = {'all_trials': engine.evaluate_scores(s, items)}; save(); del items
+print('LA19', round(FULL['ASVspoof2019 LA eval (4s)']['all_trials']['eer'], 3), f'{(time.time()-t)/60:.1f} min')
+for name, repo, full in [('In-the-Wild (4s)', 'InTheWild', False), ('In-the-Wild (full utt)', 'InTheWild', True),
+                         ('ASVspoof2021 LA', 'ASVspoof2021_LA', False), ('ASVspoof2021 DF', 'ASVspoof2021_DF', False)]:
+    t = time.time()
+    FULL[name] = score_hfbench_full(model, repo, f'{AF}/{name.replace(" ", "_").replace("(", "").replace(")", "")}',
+                                    device=DEV, bs=32, workers=NW, full_utt=full, shard_dir=f'{TMP}/shards')
+    save(); print(name, {k: round(v['eer'], 3) for k, v in FULL[name].items() if isinstance(v, dict) and 'eer' in v},
+                  f'{(time.time()-t)/60:.1f} min')
+del model; torch.cuda.empty_cache()
+"""), ('code', r"""
+ref = {'ASVspoof2019 LA eval (4s)': 'Arena 0.13', 'In-the-Wild (4s)': 'Arena 8.48',
+       'In-the-Wild (full utt)': 'paper 5.52 (ckpt khác)', 'ASVspoof2021 LA': 'paper 1.73 (phase eval) / Arena 6.14 (all)',
+       'ASVspoof2021 DF': 'paper 1.65 (phase eval) / Arena 3.61 (all)'}
+rows = []
+for k, v in FULL.items():
+    for sub in ('phase_eval', 'all_trials'):
+        if sub in v:
+            rows.append({'set': k, 'subset': sub, 'n': v[sub]['n'], 'EER %': round(v[sub]['eer'], 2),
+                         'minDCF': round(v[sub]['minDCF'], 4), 'reference': ref.get(k, '')})
+display(pd.DataFrame(rows))
+for k, v in FULL.items():
+    if 'phase_eval_breakdown_eer' in v:
+        print(k, {a: round(e, 2) for a, e in v['phase_eval_breakdown_eer'].items()})
+""")]
+
+PAPER_TRAIN_OVERRIDE = r"""
+RUN_A = False
+RUN_B = True
+RUN_C = False
+# Công thức của paper / code gốc (Nes2Net_ASVspoof_ITW README): wav2vec2 XLS-R 300M fine-tune + Nes2Net-X [8,8],
+# SE 1, dilation 2, mean pooling, Adam lr 2.5e-7 wd 1e-4, batch 12, 100 epoch, RawBoost algo 4,
+# weighted CE [0.1, 0.9], dev = toàn bộ ASVspoof2019 LA dev (có/không aug), cửa sổ 4 s đầu.
+B = dict(lr=2.5e-7, bs=12, epochs=100, algo=4, time_budget_h=11.0, dev='asv19:validation', avg_k=3,
+         keep_best_k=4, save_every_steps=500)
+B_TRAIN = 'asv19:train'
+B_EVAL = False   # đặt True ở phiên cuối (khi đủ 100 epoch) để trung bình checkpoint + đánh giá
+"""
+
+PAPER_TRAIN_CELLS = [('md', r"""
+### Resume qua nhiều phiên Kaggle
+100 epoch × ~1 giờ/epoch trên T4 vượt xa 12 giờ/phiên. Kernel này dùng **chính output của phiên trước** làm input
+(`kernel_sources`), copy `runB/` (last_state.pth + các checkpoint tốt nhất + history) vào `/kaggle/working` rồi
+train tiếp. Mỗi phiên dừng an toàn sau `time_budget_h` và lưu trạng thái.
+"""), ('code', r"""
+import glob, shutil
+prev = sorted(glob.glob('/kaggle/input/**/runB/last_state.pth', recursive=True))
+if prev and not os.path.exists(f'{WORK}/runB/last_state.pth'):
+    src = os.path.dirname(prev[0]); os.makedirs(f'{WORK}/runB', exist_ok=True)
+    for f in os.listdir(src):
+        shutil.copy2(os.path.join(src, f), f'{WORK}/runB/{f}')
+    print('resumed files from', src, os.listdir(f'{WORK}/runB'))
+else:
+    print('no previous state found -> fresh start' if not prev else 'state already in WORK')
+""")]
+
+
 if __name__ == '__main__':
     for plat in PLATFORM:
         build(plat)
-    build('kaggle', smoke=True, out=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'kaggle',
-                                                 'nes2net_kaggle_smoke.ipynb'))
+    K = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'kaggle')
+    build('kaggle', smoke=True, out=os.path.join(K, 'nes2net_kaggle_smoke.ipynb'))
+    build('kaggle', out=os.path.join(K, 'full_eval', 'nes2net_full_eval.ipynb'), override=FULL_EVAL_OVERRIDE,
+          pre_cells=FULL_EVAL_CELLS, title_suffix=' (đánh giá đầy đủ + ablation)')
+    build('kaggle', out=os.path.join(K, 'paper_train', 'nes2net_paper_train.ipynb'), override=PAPER_TRAIN_OVERRIDE,
+          pre_cells=PAPER_TRAIN_CELLS, title_suffix=' (train theo công thức paper, nhiều phiên)')

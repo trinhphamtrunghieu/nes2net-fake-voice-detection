@@ -86,3 +86,34 @@ def get_items(spec: str, cache_dir=None) -> list[Item]:
     if n:
         items = balanced_subset(items, n, seed=0)
     return items
+
+
+# ---------------------------------------------------------------------------------- large sets
+def hfbench_files(repo: str) -> list[str]:
+    from huggingface_hub import HfApi
+    repo = repo if '/' in repo else 'SpeechAntiSpoofingBenchmarks/' + repo
+    return sorted(f for f in HfApi().list_repo_files(repo, repo_type='dataset')
+                  if f.startswith('data/test-') and f.endswith('.parquet'))
+
+
+def load_hfbench_shard(repo: str, file: str, local_dir: str) -> tuple[list[Item], str]:
+    """Download ONE parquet shard and return in-memory Items (audio bytes) + the local path.
+    Uses pyarrow directly (no `datasets` arrow cache), so the caller can delete the file after
+    scoring and keep disk usage at ~1 shard (ASVspoof2021 DF = 80 x ~430 MB)."""
+    import json
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+    repo = repo if '/' in repo else 'SpeechAntiSpoofingBenchmarks/' + repo
+    p = hf_hub_download(repo, file, repo_type='dataset', local_dir=local_dir)
+    items = []
+    for j, r in enumerate(pq.read_table(p).to_pylist()):
+        try:
+            m = json.loads(r.get('notes') or '{}')
+        except Exception:
+            m = {}
+        m['attack'] = m.get('attack_id', '-')
+        lab = r['label']
+        lab = int(lab == 0) if isinstance(lab, int) else int(str(lab).lower().startswith('bona'))
+        key = m.get('utterance_id') or os.path.splitext(os.path.basename(r.get('path') or f'{file}_{j}'))[0]
+        items.append(Item(key, r['audio']['bytes'], lab, m))
+    return items, p
