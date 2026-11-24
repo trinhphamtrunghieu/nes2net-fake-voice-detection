@@ -9,6 +9,7 @@ chạy được trên Kaggle.
 |---|---|
 | 📓 Kaggle notebook | [`notebooks/nes2net_kaggle.ipynb`](notebooks/nes2net_kaggle.ipynb) · [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net_kaggle.ipynb) |
 | 📓 Colab notebook | [`notebooks/nes2net_colab.ipynb`](notebooks/nes2net_colab.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net_colab.ipynb) |
+| 📓 Colab: train theo paper (Pro/A100) | [`notebooks/nes2net_colab_paper_train.ipynb`](notebooks/nes2net_colab_paper_train.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net_colab_paper_train.ipynb) |
 | 🤗 Demo | [HF Space](https://huggingface.co/spaces/trinhphamtrunghieu/nes2net-fake-voice-detection) · code trong `space/` |
 | 📄 Tóm tắt paper | [`docs/paper_summary.md`](docs/paper_summary.md) |
 | 🔬 Ablation, research gap, đề xuất | [`docs/ablation_and_gaps.md`](docs/ablation_and_gaps.md) |

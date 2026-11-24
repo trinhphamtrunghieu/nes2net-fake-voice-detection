@@ -8,6 +8,7 @@ import os
 
 REPO_URL = os.environ.get('REPO_URL', 'https://github.com/trinhphamtrunghieu/nes2net-fake-voice-detection.git')
 BLOB = 'github/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net_colab.ipynb'
+BLOB_PAPER = BLOB.replace('nes2net_colab.ipynb', 'nes2net_colab_paper_train.ipynb')
 
 INTRO = r"""
 **Paper:** *Nes2Net: A Lightweight Nested Architecture for Foundation Model Driven Speech Anti-spoofing*
@@ -264,6 +265,32 @@ else:
 """)]
 
 
+COLAB_PAPER_OVERRIDE = r"""
+RUN_A = False
+RUN_B = True
+RUN_C = False
+# Công thức paper (giống kaggle/paper_train): lr 2.5e-7, batch 12, 100 epoch, RawBoost 4, toàn bộ dev.
+# Colab Pro: chọn GPU A100 (hoặc L4) + High-RAM. Mỗi phiên tối đa ~24 giờ, nhưng gói Pro cần giữ tab mở;
+# time_budget_h = 11.5 để dừng an toàn trước khi bị thu hồi. Chạy lại notebook = train tiếp từ Drive.
+B = dict(lr=2.5e-7, bs=12, epochs=100, algo=4, time_budget_h=11.5, dev='asv19:validation', avg_k=3,
+         keep_best_k=3, save_every_steps=500)
+B_TRAIN = 'asv19:train'
+B_EVAL = False    # True ở phiên cuối (đủ 100 epoch): trung bình top-3 checkpoint + đánh giá
+NW = max(1, min(8, os.cpu_count() or 2))   # A100/L4 runtime có nhiều vCPU hơn -> RawBoost nhanh hơn
+print('workers =', NW)
+"""
+
+COLAB_PAPER_CELLS = [('md', r"""
+### Dung lượng Google Drive
+Trạng thái resume (model + Adam) ~3.8 GB, mỗi checkpoint ~1.3 GB; `keep_best_k=3` giữ tối đa 6 checkpoint
+(3 tốt nhất theo val loss có aug và 3 theo không aug) → tối đa ~12 GB trong `MyDrive/nes2net/runB`.
+Colab Pro **không** kèm thêm dung lượng Drive: cần ≥ 12 GB trống (hoặc giảm `keep_best_k`).
+
+Trạng thái lưu cùng định dạng với kernel Kaggle `nes2net-paper-train`, nên có thể chuyển qua lại: copy thư mục
+`runB/` từ output Kaggle vào `MyDrive/nes2net/runB` là Colab train tiếp đúng epoch/step đó.
+""")]
+
+
 if __name__ == '__main__':
     for plat in PLATFORM:
         build(plat)
@@ -273,3 +300,6 @@ if __name__ == '__main__':
           pre_cells=FULL_EVAL_CELLS, title_suffix=' (đánh giá đầy đủ + ablation)')
     build('kaggle', out=os.path.join(K, 'paper_train', 'nes2net_paper_train.ipynb'), override=PAPER_TRAIN_OVERRIDE,
           pre_cells=PAPER_TRAIN_CELLS, title_suffix=' (train theo công thức paper, nhiều phiên)')
+    build('colab', out=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nes2net_colab_paper_train.ipynb'),
+          override=COLAB_PAPER_OVERRIDE, pre_cells=COLAB_PAPER_CELLS,
+          title_suffix=' (train theo công thức paper, Colab Pro / A100)')
