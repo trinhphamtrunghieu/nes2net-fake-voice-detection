@@ -242,8 +242,9 @@ def count_macs(m: nn.Module, C: int = 1024, T: int = 201) -> float:
           if isinstance(mm, (nn.Conv1d, nn.Conv2d, nn.Linear))]
     was_training = m.training
     m.eval()
+    dev = next(m.parameters()).device          # model may already sit on the GPU
     with torch.no_grad():
-        m(torch.randn(1, C, T))
+        m(torch.randn(1, C, T, device=dev))
     m.train(was_training)
     for h in hs:
         h.remove()
