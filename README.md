@@ -3,13 +3,11 @@
 Tái hiện **Nes2Net: A Lightweight Nested Architecture for Foundation Model Driven Speech Anti-spoofing**
 (Tianchi Liu, Duc-Tuan Truong, Rohan Kumar Das, Kong Aik Lee, Haizhou Li — IEEE T-IFS 2025,
 [arXiv:2504.05657](https://arxiv.org/abs/2504.05657)) bằng PyTorch + 🤗 Transformers, **không cần fairseq**,
-chạy được trên Kaggle.
+chạy được trên Kaggle, Colab hoặc máy local.
 
 | | |
 |---|---|
-| 📓 Kaggle notebook | [`notebooks/nes2net_kaggle.ipynb`](notebooks/nes2net_kaggle.ipynb) · [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net_kaggle.ipynb) |
-| 📓 Colab notebook | [`notebooks/nes2net_colab.ipynb`](notebooks/nes2net_colab.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net_colab.ipynb) |
-| 📓 Colab: train theo paper (Pro/A100) | [`notebooks/nes2net_colab_paper_train.ipynb`](notebooks/nes2net_colab_paper_train.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net_colab_paper_train.ipynb) |
+| 📓 Notebook (Kaggle · Colab · local) | [`notebooks/nes2net.ipynb`](notebooks/nes2net.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net.ipynb) [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/trinhphamtrunghieu/nes2net-fake-voice-detection/blob/main/notebooks/nes2net.ipynb) |
 | 🤗 Demo | [HF Space](https://huggingface.co/spaces/trinhphamtrunghieu/nes2net-fake-voice-detection) · code trong `space/` |
 | 📄 Tóm tắt paper | [`docs/paper_summary.md`](docs/paper_summary.md) |
 | 🔬 Ablation, research gap, đề xuất | [`docs/ablation_and_gaps.md`](docs/ablation_and_gaps.md) |
@@ -24,7 +22,10 @@ chạy được trên Kaggle.
   aug, trung bình checkpoint), cộng thêm AMP và giới hạn thời gian.
 * `nes2net/ablation.py`: cache đặc trưng SSL đóng băng và lưới ablation nhiều seed.
 * `nes2net/datasets_zoo.py`: ASVspoof2019 LA, In-the-Wild, ASVspoof2021 DF/LA lấy thẳng từ HF Hub hoặc từ
-  thư mục gốc; lọc `phase=eval` như script chấm chính thức.
+  thư mục gốc; lọc `phase=eval` như script chấm chính thức. `nes2net/full_eval.py`: chấm cả tập theo từng shard.
+* `nes2net/presets.py`, `nes2net/env.py`, `nes2net/run.py`: cấu hình theo preset, nhận diện nền tảng, và các hàm
+  chạy từng phần (A/B/C). Notebook và dòng lệnh `python -m nes2net.run` đều gọi chung các hàm này.
+* `nes2net/logutil.py`: `train.log`, `metrics.jsonl`, TensorBoard.
 
 ## Dùng nhanh
 ```bash
@@ -49,22 +50,34 @@ m = load_official_checkpoint('ckpt/nes2net_x_DF1.65.pth').eval()
 score = m(wave_4s_16k[None])[:, 1]     # cao hơn = bona fide
 ```
 
-## Kaggle
-1. Bấm badge *Open in Kaggle* ở trên (hoặc *File → Import Notebook* → dán URL của `notebooks/nes2net_kaggle.ipynb`).
-2. Settings: **GPU T4/P100**, **Internet On**.
-3. Chỉnh `RUN_A / RUN_B / RUN_C` trong ô Config → *Save & Run All*.
+## Notebook: một file cho mọi nền tảng
+`notebooks/nes2net.ipynb` tự nhận Kaggle / Colab / local và chọn chỗ lưu kết quả (`WORK`):
+`/kaggle/working`, `MyDrive/nes2net` (Colab, mount Drive) hoặc `./work`. Dữ liệu và cache lớn nằm ở đĩa tạm.
 
-## Google Colab
-1. Bấm badge *Open In Colab* ở trên → *Runtime → Change runtime type → GPU*.
-2. Chạy ô Setup: cho phép **mount Google Drive**. Kết quả, checkpoint và trạng thái resume nằm ở
-   `MyDrive/nes2net`; dữ liệu và cache nằm ở `/content` (tự tải lại mỗi phiên).
-3. Chỉnh `RUN_A / RUN_B / RUN_C` → *Runtime → Run all*.
-4. Phần B (train end-to-end) chạy theo từng phiên (`time_budget_h=3.5`) và lưu `last_state.pth` mỗi 300 bước. Khi
-   Colab ngắt kết nối, chỉ cần chạy lại notebook là train tiếp. Mặc định giữ 3 checkpoint tốt nhất (~8 GB trên
-   Drive; Drive free có 15 GB).
+1. Mở bằng badge ở trên. Kaggle: bật **GPU T4** và **Internet On**. Colab: *Runtime → Change runtime type → GPU*
+   (Pro: A100/L4); ô Setup sẽ xin quyền mount Google Drive.
+2. Trong ô Config chọn `PRESET`:
 
-Hai notebook được sinh từ cùng một nguồn (`notebooks/build_notebook.py` + `notebooks/_cells.py`); sửa ở đó rồi
-chạy `python notebooks/build_notebook.py`.
+| Preset | Chạy gì | Thời gian (T4) |
+|---|---|---|
+| `smoke` | tập con rất nhỏ của mọi phần, chỉ để kiểm tra pipeline | ~30 phút |
+| `default` | A (checkpoint chính thức trên tập con) + C (ablation) + C2 (chọn layer) | ~3–4 giờ |
+| `full_eval` | A trên toàn bộ LA19 / ITW / 2021 LA / 2021 DF + C + C2 | ~6–8 giờ |
+| `paper_train` | B: train đúng công thức paper, resume qua nhiều phiên | ~80–100 giờ |
+
+3. Ghi đè bất kỳ tham số nào qua `OVERRIDES`, ví dụ `{'B': {'lr': 2e-6}, 'run': {'L': False}}`.
+   Cấu hình đầy đủ nằm ở `nes2net/presets.py`; chỉ `time_budget_h` thay đổi theo nền tảng.
+4. **Train nhiều phiên:** chạy lại notebook với cùng preset là train tiếp từ `WORK/runB/last_state.pth`. Với các lần
+   train dài, đặt `REPO_REF` thành một commit cố định để code không đổi giữa các phiên.
+
+**Sửa code:** chỉ sửa trong `nes2net/` rồi push. Notebook clone repo lúc chạy nên không cần sửa notebook, trừ khi bạn
+đổi tên hàm mà notebook gọi tới. Trên Colab, nếu runtime đã import `nes2net` thì phải *Restart session*.
+
+**Dòng lệnh tương đương:** `python -m nes2net.run --preset full_eval --set run.L=false`
+
+**Đẩy lên Kaggle bằng API:** `python scripts/kaggle_push.py --user <kaggle-user> --preset smoke`. Script chỉ thay dòng
+`PRESET = ...` trong một bản sao tạm của notebook; với `paper_train`, thêm `--resume` từ phiên thứ hai để kernel dùng
+output của phiên trước.
 
 ## Demo HF Space
 Workflow `.github/workflows/deploy_space.yml` tự tạo hoặc cập nhật Space mỗi lần push vào `main` (cần
@@ -88,14 +101,4 @@ checkpoint và bộ parquet đánh giá do [SpeechAntiSpoofingBenchmarks](https:
   journal={IEEE Transactions on Information Forensics and Security},
   title={Nes2Net: A Lightweight Nested Architecture for Foundation Model Driven Speech Anti-Spoofing},
   year={2025}, volume={20}, pages={12005-12018}, doi={10.1109/TIFS.2025.3626963}}
-```
-
-## Kaggle smoke run (kiểm tra pipeline nhanh, ~30–45 phút)
-`kaggle/nes2net_kaggle_smoke.ipynb` chạy cả 3 phần A/B/C trên tập con rất nhỏ (vài trăm câu), chỉ để xác nhận
-code chạy được trên Kaggle GPU. Số liệu của nó không có giá trị so sánh.
-```bash
-sed -i "s/__KAGGLE_USER__/<kaggle-username>/" kaggle/kernel-metadata.json
-kaggle kernels push -p kaggle --accelerator NvidiaTeslaT4
-kaggle kernels status <kaggle-username>/nes2net-smoke-run
-kaggle kernels output <kaggle-username>/nes2net-smoke-run -p kaggle_out
 ```
