@@ -97,6 +97,38 @@ if RUN_B and B_EVAL:
 """)
 
 md(r"""
+### Theo dõi log của phần B
+`engine.train` ghi ba loại log vào `WORK/runB`, và lần resume nối tiếp vào đúng các file đó:
+* `train.log`: log dạng chữ, giống console. Cứ `log_every=50` bước ghi một dòng gồm loss, lr, utt/s, % thời gian
+  chờ DataLoader (nếu cao thì RawBoost/CPU là nút cổ chai), GPU memory, ETA của epoch; cuối mỗi epoch ghi val loss và val EER.
+* `metrics.jsonl`: cùng các số đó dạng JSON (event `start` / `train_step` / `epoch` / `checkpoint` / `resume` / `stop`).
+* `tb/`: TensorBoard (đặt `SHOW_TB = True` để mở ngay trong notebook).
+""")
+code(r"""
+SHOW_TB = False
+_mp = f'{WORK}/runB/metrics.jsonl'
+if os.path.exists(_mp):
+    from nes2net.logutil import load_metrics
+    import matplotlib.pyplot as plt
+    M = load_metrics(_mp)
+    st, ep = M[M.event == 'train_step'], M[M.event == 'epoch']
+    fig, ax = plt.subplots(1, 3, figsize=(18, 4))
+    if len(st):
+        x = (st.epoch - 1) + st.step / st.steps
+        ax[0].plot(x, st.loss, lw=.7, label='train loss (window)'); ax[0].set_xlabel('epoch')
+        ax[1].plot(x, st.utt_per_s, lw=.7, label='utt/s'); ax[1].plot(x, 100 * st.data_frac, lw=.7, label='% chờ dữ liệu')
+    if len(ep):
+        ax[0].plot(ep.epoch, ep.val_loss_wo_aug, 'o-', label='val loss'); ax[0].plot(ep.epoch, ep.val_loss_w_aug, 's-', label='val loss (aug)')
+        ax[2].plot(ep.epoch, ep.val_eer_wo_aug, 'o-', label='val EER %'); ax[2].plot(ep.epoch, ep.val_eer_w_aug, 's-', label='val EER % (aug)')
+    for a in ax: a.legend(); a.grid(alpha=.3)
+    plt.tight_layout(); plt.show()
+    print(open(f'{WORK}/runB/train.log').read()[-3000:])
+    if SHOW_TB:
+        get_ipython().run_line_magic('load_ext', 'tensorboard')
+        get_ipython().run_line_magic('tensorboard', f'--logdir {WORK}/runB/tb')
+""")
+
+md(r"""
 ## C. Ablation back-end trên đặc trưng XLS-R đóng băng
 Mỗi câu được cắt 4 s đầu, đặc trưng layer cuối XLS-R (pre-trained, **không fine-tune**) được cache fp16 một lần;
 sau đó mỗi back-end chỉ train vài phút. EER tuyệt đối cao hơn paper (SSL đóng băng, tập con) —

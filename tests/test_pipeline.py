@@ -68,7 +68,7 @@ def test_resume_and_prune(tmp_path):
     items = hf_items(ds, lambda r: int(r['label'] == 0), lambda r, j: f'k{j}')
     out = str(tmp_path / 'run')
     logs = []
-    kw = dict(bs=4, algo=0, device='cpu', amp=False, workers=0, keep_best_k=1, log=logs.append)
+    kw = dict(bs=4, algo=0, device='cpu', amp=False, workers=0, keep_best_k=1, log=logs.append, log_every=1)
     # 1) stop mid-epoch through the time budget -> state saved with step > 0
     h = engine.train(_tiny_model(), items, items, out, epochs=3, time_budget_h=1e-9, **kw)
     st = torch.load(os.path.join(out, 'last_state.pth'), weights_only=False)
@@ -80,6 +80,14 @@ def test_resume_and_prune(tmp_path):
     # 3) already finished -> nothing more to do
     h2 = engine.train(_tiny_model(), items, items, out, epochs=3, **kw)
     assert len(h2) == 3
+    # logging: text log + JSONL metrics with step/epoch/resume/stop events
+    from nes2net.logutil import load_metrics
+    df = load_metrics(os.path.join(out, 'metrics.jsonl'))
+    assert {'start', 'train_step', 'epoch', 'resume', 'stop', 'finished'} <= set(df.event)
+    ep = df[df.event == 'epoch']
+    assert ep['epoch'].tolist() == [1, 2, 3] and ep['val_eer_wo_aug'].notna().all()
+    assert 'utt_per_s' in df[df.event == 'train_step'].columns
+    assert 'resumed' in open(os.path.join(out, 'train.log')).read()
     kept = [f for f in os.listdir(out) if f.startswith('epoch_')]
     assert 1 <= len(kept) <= 2               # keep_best_k=1 for each of the two val criteria
 
