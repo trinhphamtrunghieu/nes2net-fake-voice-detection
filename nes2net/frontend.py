@@ -36,14 +36,24 @@ class HFSSL(nn.Module):
     """
 
     def __init__(self, name_or_path: str | None = 'facebook/wav2vec2-xls-r-300m',
-                 layer='last', pretrained: bool = True, gradient_checkpointing: bool = False):
+                 layer='last', pretrained: bool = True, gradient_checkpointing: bool = False,
+                 attn_implementation: str = 'sdpa'):
         super().__init__()
         from transformers import AutoModel, Wav2Vec2Config, Wav2Vec2Model
-        if pretrained and name_or_path:
-            self.model = AutoModel.from_pretrained(
-                name_or_path, mask_time_prob=0.0, mask_feature_prob=0.0, layerdrop=0.0)
-        else:  # architecture only (weights come from a checkpoint later)
-            self.model = Wav2Vec2Model(Wav2Vec2Config(**XLSR_300M_CONFIG))
+        # 'sdpa' = torch scaled_dot_product_attention (fused / flash kernels on GPU); same math as
+        # 'eager' up to floating-point rounding, noticeably faster for 24 layers x 201 frames.
+        try:
+            if pretrained and name_or_path:
+                self.model = AutoModel.from_pretrained(
+                    name_or_path, mask_time_prob=0.0, mask_feature_prob=0.0, layerdrop=0.0,
+                    attn_implementation=attn_implementation)
+            else:  # architecture only (weights come from a checkpoint later)
+                self.model = Wav2Vec2Model(Wav2Vec2Config(**XLSR_300M_CONFIG, attn_implementation=attn_implementation))
+        except (ValueError, ImportError, TypeError):      # model/transformers without sdpa support
+            if pretrained and name_or_path:
+                self.model = AutoModel.from_pretrained(name_or_path, mask_time_prob=0.0, mask_feature_prob=0.0, layerdrop=0.0)
+            else:
+                self.model = Wav2Vec2Model(Wav2Vec2Config(**XLSR_300M_CONFIG))
         if gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
         self.layer = layer

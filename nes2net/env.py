@@ -32,7 +32,7 @@ class Env:
 
 
 def setup(use_drive: bool = True, work: str | None = None, tmp: str | None = None,
-          max_workers: int = 8) -> Env:
+          max_workers: int = 12) -> Env:
     """Create the directories, point the HF cache at TMP, mount Google Drive on Colab."""
     import torch
     plat = detect_platform()

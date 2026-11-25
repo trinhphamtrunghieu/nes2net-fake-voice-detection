@@ -31,9 +31,10 @@ def weighted_ce(device):
 
 def _loader(items, bs, algo=0, shuffle=False, workers=4, full=False, drop_last=False):
     ds = WaveDataset(items, algo=algo, full=full)
+    extra = {'prefetch_factor': 4} if workers > 0 else {}
     return DataLoader(ds, batch_size=1 if full else bs, shuffle=shuffle, num_workers=workers,
                       drop_last=drop_last, pin_memory=torch.cuda.is_available(),
-                      persistent_workers=workers > 0)
+                      persistent_workers=workers > 0, **extra)
 
 
 @torch.no_grad()
@@ -101,6 +102,22 @@ def val_loss(model, loader, crit, device, amp=True, return_eer=False):
     return loss, eer
 
 
+def _grad_ckpt_on(model) -> bool:
+    m = getattr(getattr(model, 'ssl_model', None), 'model', None)
+    for attr in ('is_activation_checkpointing', 'is_gradient_checkpointing'):   # newer / older transformers
+        if hasattr(type(m), attr) or hasattr(m, attr):
+            try:
+                return bool(getattr(m, attr))
+            except Exception:
+                pass
+    return False
+
+
+def _attn_impl(model) -> str:
+    m = getattr(getattr(model, 'ssl_model', None), 'model', None)
+    return getattr(getattr(m, 'config', None), '_attn_implementation', '?')
+
+
 def _prune(out_dir, hist, keep_k):
     """Keep only the keep_k best saved epochs (by val loss w/o aug, then w/ aug) on disk."""
     keep = set(best_epochs(hist, keep_k, 'val_loss_wo_aug')) | set(best_epochs(hist, keep_k, 'val_loss_w_aug'))
@@ -114,7 +131,7 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
           algo=4, val_aug=True, device='cuda', amp=True, accum=1, workers=4,
           time_budget_h: float | None = None, log=None, resume: bool = True,
           keep_best_k: int | None = None, save_every_steps: int | None = None,
-          log_every: int = 50, tb: bool = True):
+          log_every: int = 50, tb: bool = True, eval_bs: int | None = None):
     """Official recipe: Adam(lr, wd=1e-4), weighted CE, RawBoost on train; keep a checkpoint
     whenever val loss (w/ or w/o aug) improves. Returns history list.
 
@@ -130,6 +147,12 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
     ``log`` (a callable) is kept for backward compatibility and receives the text lines too.
     """
     os.makedirs(out_dir, exist_ok=True)
+    if device.startswith('cuda'):
+        # fixed 64,600-sample inputs -> let cuDNN pick the fastest conv kernels; TF32 matmuls on Ampere+
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    eval_bs = eval_bs or bs           # validation is forward-only: a larger batch keeps the GPU busy
     R = RunLogger(out_dir, tb=tb)
     _ext = log
 
@@ -142,8 +165,8 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
     scaler = torch.amp.GradScaler('cuda', enabled=amp and device.startswith('cuda'))
     crit = weighted_ce(device)
     tr = _loader(train_items, bs, algo=algo, shuffle=True, workers=workers, drop_last=True)
-    dv0 = _loader(dev_items, bs, algo=0, workers=workers)
-    dv1 = _loader(dev_items, bs, algo=algo, workers=workers) if val_aug and algo else None
+    dv0 = _loader(dev_items, eval_bs, algo=0, workers=workers)
+    dv1 = _loader(dev_items, eval_bs, algo=algo, workers=workers) if val_aug and algo else None
     best0 = best1 = math.inf
     hist, start_ep, start_step, carry = [], 1, 0, (0.0, 0)
     state_path = os.path.join(out_dir, 'last_state.pth')
@@ -171,7 +194,9 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
     n_tr = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f'start: epochs {start_ep}..{epochs}, {len(tr)} steps/epoch (bs {bs} x accum {accum}), '
         f'train {len(train_items)} / dev {len(dev_items)} utts, lr {lr:g}, RawBoost algo {algo}, '
-        f'params {n_par / 1e6:.1f}M ({n_tr / 1e6:.1f}M trainable), device {device}, amp {amp}')
+        f'params {n_par / 1e6:.1f}M ({n_tr / 1e6:.1f}M trainable), device {device}'
+        f'{" (" + torch.cuda.get_device_name(0) + ")" if device.startswith("cuda") else ""}, amp {amp}, '
+        f'workers {workers}, eval_bs {eval_bs}, grad_ckpt {_grad_ckpt_on(model)}, attn {_attn_impl(model)}')
     R.metric('start', lr=lr, bs=bs, accum=accum, algo=algo, steps_per_epoch=len(tr), n_train=len(train_items),
              n_dev=len(dev_items), params_m=n_par / 1e6, trainable_m=n_tr / 1e6)
     t0 = time.time()

@@ -111,3 +111,18 @@ def test_rawboost_algos():
     for a in range(9):
         y = rawboost(x.copy(), a)
         assert y.shape == x.shape and np.isfinite(y).all()
+
+
+def test_sdpa_matches_eager():
+    from transformers import Wav2Vec2Config, Wav2Vec2Model
+    from nes2net.frontend import XLSR_300M_CONFIG
+    torch.manual_seed(0)
+    cfg = dict(XLSR_300M_CONFIG, num_hidden_layers=2)
+    a = Wav2Vec2Model(Wav2Vec2Config(**cfg, attn_implementation='eager')).eval()
+    b = Wav2Vec2Model(Wav2Vec2Config(**cfg, attn_implementation='sdpa')).eval()
+    b.load_state_dict(a.state_dict())
+    x = torch.randn(2, 16000)
+    with torch.no_grad():
+        assert torch.allclose(a(x).last_hidden_state, b(x).last_hidden_state, atol=1e-4)
+    from nes2net.run import resolve_grad_ckpt
+    assert resolve_grad_ckpt(True) and not resolve_grad_ckpt(False) and resolve_grad_ckpt('auto', 'cpu') is False

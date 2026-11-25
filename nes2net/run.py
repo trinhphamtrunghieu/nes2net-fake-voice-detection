@@ -138,10 +138,22 @@ def _restore_from_kaggle_input(out: str):
         log.info('restored previous session state from %s', src)
 
 
-def _build_train_model(cfg):
+def resolve_grad_ckpt(setting, device: str = 'cuda') -> bool:
+    """'auto': gradient checkpointing only on GPUs with < 22 GB (T4 16 GB needs it for bs 12 at 4 s;
+    A100 / L4 / A10 do not). It trades ~30 % extra compute for memory and does not change the math."""
+    if setting != 'auto':
+        return bool(setting)
+    if not (device.startswith('cuda') and torch.cuda.is_available()):
+        return False
+    return torch.cuda.get_device_properties(0).total_memory / 2**30 < 22
+
+
+def _build_train_model(cfg, device='cuda'):
     from .model import SSLNes2Net
     b = cfg['B']
-    return SSLNes2Net(b['ssl'], backend=b['backend'], gradient_checkpointing=True)
+    gc = resolve_grad_ckpt(b.get('grad_ckpt', 'auto'), device)
+    return SSLNes2Net(b['ssl'], backend=b['backend'], gradient_checkpointing=gc,
+                      attn_implementation=b.get('attn', 'sdpa'))
 
 
 def train(cfg: dict, env: Env):
@@ -150,12 +162,12 @@ def train(cfg: dict, env: Env):
     if env.platform == 'kaggle' and b['resume_from_kaggle_input']:
         _restore_from_kaggle_input(out)
     engine.set_seed(b['seed'])
-    model = _build_train_model(cfg)
+    model = _build_train_model(cfg, env.device)
     tr, dv = get_items(b['train']), get_items(b['dev'])
     hist = engine.train(model, tr, dv, out, epochs=b['epochs'], lr=b['lr'], bs=b['bs'], algo=b['algo'],
                         device=env.device, amp=True, workers=env.workers, time_budget_h=b['time_budget_h'],
                         resume=True, keep_best_k=b['keep_best_k'], save_every_steps=b['save_every_steps'],
-                        log_every=b['log_every'])
+                        log_every=b['log_every'], eval_bs=b.get('eval_bs'))
     log.info('%d/%d epochs done; state in %s (rerun to resume)', len(hist), b['epochs'], out)
     del model; _free()
     return hist

@@ -43,6 +43,9 @@ _BASE = {
           'lr': 1e-6, 'bs': 12, 'epochs': 100, 'algo': 4, 'time_budget_h': None,
           'keep_best_k': 3, 'save_every_steps': 500, 'avg_k': 3, 'log_every': 50,
           'out': 'runB', 'resume_from_kaggle_input': True,
+          # speed settings (do not change the recipe): gradient checkpointing only when VRAM < 22 GB,
+          # fused SDPA attention, bigger batch for forward-only validation
+          'grad_ckpt': 'auto', 'attn': 'sdpa', 'eval_bs': 48,
           'eval_sets': [['ASVspoof2019 LA eval', 'asv19:test'], ['ITW', 'hfbench:InTheWild'],
                         ['DF eval-phase 10 shards', 'hfbench:ASVspoof2021_DF:10:eval']]},
     # C: frozen-feature back-end ablations
