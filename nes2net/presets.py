@@ -6,6 +6,8 @@ or ``python -m nes2net.run --preset ...``.
   full_eval    official checkpoint on the FULL test sets + full ablation grid (~6-8 h on a T4)
   vi_zeroshot  official checkpoint, zero-shot on a Vietnamese probe (FLEURS vi vs MMS-TTS vi) + an
                English control probe built the same way (~30-45 min on a T4)
+  diag_data    sanity check of the ASVspoof2019 LA copy used for training: labels vs attack ids,
+               audio statistics per split/class, official-checkpoint EER on train/dev/test (~15 min)
   paper_train  the paper's training recipe (lr 2.5e-7, bs 12, 100 epochs, RawBoost 4, full dev),
                run over many sessions with resume
 
@@ -23,7 +25,7 @@ ABLATION_GROUPS = ['A0_baselines', 'A1_nest_ratio', 'A2_se_ratio', 'A3_pooling',
 _BASE = {
     # which parts run
     'run': {'sanity': True, 'A': False, 'A_full': False, 'B': False, 'B_eval': False, 'C': False, 'L': False,
-            'VI': False},
+            'VI': False, 'DIAG': False},
     'ckpt': {'repo': 'SpeechAntiSpoofingBenchmarks/Nes2Net', 'file': 'nes2net_x_DF1.65.pth'},
     # A: official checkpoint on subsets. sets: [name, spec, full_utterance]
     'A': {'sets': [
@@ -60,6 +62,10 @@ _BASE = {
     'VI': {'probes': [['vi (FLEURS vs MMS-TTS)', 'vi_vn', 'facebook/mms-tts-vie'],
                       ['en control (FLEURS vs MMS-TTS)', 'en_us', 'facebook/mms-tts-eng']],
            'split': 'test', 'limit': None, 'full_utt': True},
+    # DIAG: data sanity for the training data (label/attack crosstab, audio statistics per split and
+    # class, official-checkpoint EER per split). n = random utterances per split for audio stats + EER.
+    'DIAG': {'specs': [['train', 'asv19:train'], ['dev', 'asv19:validation'], ['test', 'asv19:test']],
+             'n': 2000, 'seed': 0},
     # L: SSL layer study (cache several layers on smaller subsets)
     'L': {'layers': [8, 12, 18, 24], 'train': 'asv19:train@3000', 'dev': 'asv19:validation@1000',
           'itw': 'hfbench:InTheWild@2000', 'seeds': [0, 1, 2], 'epochs': 15},
@@ -68,7 +74,7 @@ _BASE = {
 _PRESETS = {
     'default': {'run': {'A': True, 'C': True, 'L': True}},
     'smoke': {
-        'run': {'A': True, 'B': True, 'B_eval': True, 'C': True, 'L': True, 'VI': True},
+        'run': {'A': True, 'B': True, 'B_eval': True, 'C': True, 'L': True, 'VI': True, 'DIAG': True},
         'A': {'sets': [['ITW@600 (4s)', 'hfbench:InTheWild@600', False],
                        ['ASVspoof2019 LA eval@600', 'asv19:test@600', False],
                        ['DF phase=eval (1 shard)@600', 'hfbench:ASVspoof2021_DF:1:eval@600', False]]},
@@ -81,9 +87,11 @@ _PRESETS = {
         'L': {'train': 'asv19:train@300', 'dev': 'asv19:validation@150', 'itw': 'hfbench:InTheWild@200',
               'seeds': [0], 'epochs': 3},
         'VI': {'limit': 40},
+        'DIAG': {'n': 100},
     },
     'full_eval': {'run': {'A_full': True, 'C': True, 'L': True}},
     'vi_zeroshot': {'run': {'VI': True}},
+    'diag_data': {'run': {'DIAG': True}},
     'paper_train': {
         'run': {'B': True},
         'B': {'lr': 2.5e-7, 'bs': 12, 'epochs': 100, 'algo': 4, 'dev': 'asv19:validation',

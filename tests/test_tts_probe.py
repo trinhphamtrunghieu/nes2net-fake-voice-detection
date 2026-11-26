@@ -49,3 +49,26 @@ def test_run_vi_zeroshot_with_fakes(tmp_path, monkeypatch):
     t = run.vi_table(res)
     assert set(t['window']) == {'4s', 'full utt'} and 'eer_bona_male' in next(iter(res.values()))
     assert os.path.exists(os.path.join(env.work, 'partVI_results.json'))
+
+
+def test_diag_data_with_fakes(tmp_path, monkeypatch):
+    import io, soundfile as sf
+    from nes2net import run, presets, datasets_zoo
+    from nes2net.data import Item
+    from nes2net.env import Env
+    from tests.test_pipeline import _tiny_model
+    rng = np.random.default_rng(2)
+    def wav(n, amp):
+        b = io.BytesIO(); sf.write(b, (rng.standard_normal(n) * amp).astype(np.float32), 16000, format='FLAC'); return b.getvalue()
+    def fake_items(spec, cache_dir=None):
+        return [Item(f'{spec}_{i}', wav(16000 + 100 * i, 0.05), int(i % 3 == 0),
+                     {'attack': '-' if i % 3 == 0 else 'A0%d' % (i % 3)}) for i in range(12)]
+    monkeypatch.setattr(datasets_zoo, 'get_items', fake_items)
+    monkeypatch.setattr(run, '_official_model', lambda cfg, env: _tiny_model().eval())
+    env = Env('local', str(tmp_path / 'w'), str(tmp_path / 't'), 0, 'cpu')
+    os.makedirs(env.work); os.makedirs(env.tmp)
+    out = run.diag_data(presets.get('diag_data', 'local', {'DIAG': {'n': 8}}), env)
+    assert set(out['official_eer']) == {'train', 'dev', 'test'}
+    assert out['crosstab']['train']['1'] == {'-': 4} and out['stats']['dev']['1']['formats'] == {'FLAC/PCM_16': 4}
+    eer, st, ct = run.diag_tables(out)
+    assert len(eer) == 3 and len(st) == 6 and len(ct) == 6

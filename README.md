@@ -64,6 +64,7 @@ score = m(wave_4s_16k[None])[:, 1]     # cao hơn = bona fide
 | `default` | A (checkpoint chính thức trên tập con) + C (ablation) + C2 (chọn layer) | ~3–4 giờ |
 | `full_eval` | A trên toàn bộ LA19 / ITW / 2021 LA / 2021 DF + C + C2 | ~6–8 giờ |
 | `vi_zeroshot` | checkpoint chính thức, zero-shot trên tập thử tiếng Việt (FLEURS vi so với cùng câu do MMS-TTS đọc) + đối chứng tiếng Anh | ~30–45 phút |
+| `diag_data` | kiểm tra dữ liệu train (nhãn, thống kê audio theo split/lớp, EER checkpoint chính thức trên train/dev/test) | ~15 phút |
 | `paper_train` | B: train đúng công thức paper, resume qua nhiều phiên | ~80–100 giờ |
 
 3. Ghi đè bất kỳ tham số nào qua `OVERRIDES`, ví dụ `{'B': {'lr': 2e-6}, 'run': {'L': False}}`.

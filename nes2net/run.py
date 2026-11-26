@@ -10,6 +10,7 @@ Each function takes the preset config (``nes2net.presets.get``) and the runtime 
   eval_trained()    part B evaluation -> partB_results.json
   ablation()        part C   -> partC_ablation.csv / .png
   layer_study()     part C2  -> partC_layers.csv
+  diag_data()       training-data sanity check -> partDIAG_results.json, DIAG_audio_*.csv
   vi_zeroshot()     Vietnamese zero-shot probe + English control -> partVI_results.json
 """
 from __future__ import annotations
@@ -328,6 +329,81 @@ def vi_table(res: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ------------------------------------------------------------------------------------------ DIAG
+def _audio_stats(src) -> dict:
+    """Stored format + simple signal statistics of one utterance (as the model sees it, 16 kHz)."""
+    import io
+    import soundfile as sf
+    from .data import HFRef, load_audio
+    raw = src.read() if isinstance(src, HFRef) else src
+    if isinstance(raw, (bytes, bytearray)):
+        info = sf.info(io.BytesIO(raw))
+    else:
+        info = sf.info(raw)
+    x = load_audio(raw)
+    a = np.abs(x)
+    thr = 10 ** (-40 / 20) * (a.max() + 1e-9)                # -40 dB relative to the peak
+    nz = np.flatnonzero(a > thr)
+    lead = (nz[0] if len(nz) else len(x)) / 16000
+    trail = ((len(x) - 1 - nz[-1]) if len(nz) else len(x)) / 16000
+    return {'format': f'{info.format}/{info.subtype}', 'sr_stored': info.samplerate, 'dur_s': len(x) / 16000,
+            'rms_db': float(20 * np.log10(np.sqrt(np.mean(x ** 2)) + 1e-9)), 'peak': float(a.max()),
+            'lead_sil_s': float(lead), 'trail_sil_s': float(trail), 'dc': float(x.mean())}
+
+
+def diag_data(cfg: dict, env: Env) -> dict:
+    """Is the training data what we think it is? Compares train / dev / test of the ASVspoof2019 LA
+    copy: (1) label vs attack-id crosstab (bona fide must be attack '-'), (2) per split x class audio
+    statistics (format, sample rate, duration, level, leading/trailing silence), (3) EER of the
+    official checkpoint on a random subset of each split. If the official model fails on train or dev
+    while it passes on test, the copy (not the training code) is the problem."""
+    from .data import balanced_subset
+    from .datasets_zoo import get_items
+    d = cfg['DIAG']
+    out = {'crosstab': {}, 'stats': {}, 'official_eer': {}}
+    subsets = {}
+    for name, spec in d['specs']:
+        items = get_items(spec)
+        ct = pd.crosstab(pd.Series([it.label for it in items], name='label (1=bona)'),
+                         pd.Series([str((it.meta or {}).get('attack', '-')) for it in items], name='attack'))
+        out['crosstab'][name] = {str(k): {str(c): int(v) for c, v in row.items() if v} for k, row in ct.iterrows()}
+        log.info('%s: %d utts, bona %d / spoof %d', name, len(items), sum(it.label == 1 for it in items),
+                 sum(it.label == 0 for it in items))
+        sub = balanced_subset(items, d['n'], seed=d['seed'], bona_frac=0.5)
+        subsets[name] = sub
+        rows = []
+        for it in sub:
+            st = _audio_stats(it.source); st['label'] = it.label; rows.append(st)
+        df = pd.DataFrame(rows)
+        agg = df.groupby('label').agg(n=('dur_s', 'size'), dur_mean=('dur_s', 'mean'), dur_p50=('dur_s', 'median'),
+                                      rms_db=('rms_db', 'mean'), peak=('peak', 'mean'),
+                                      lead_sil=('lead_sil_s', 'mean'), trail_sil=('trail_sil_s', 'mean'),
+                                      dc=('dc', 'mean'))
+        fmts = df.groupby('label')['format'].agg(lambda s: dict(s.value_counts()))
+        srs = df.groupby('label')['sr_stored'].agg(lambda s: dict(s.value_counts()))
+        out['stats'][name] = {str(k): {**{c: float(v) for c, v in r.items()}, 'formats': fmts[k], 'sr_stored': {str(a): int(b) for a, b in srs[k].items()}}
+                              for k, r in agg.iterrows()}
+        df.to_csv(os.path.join(env.work, f'DIAG_audio_{name}.csv'), index=False)
+    model = _official_model(cfg, env)
+    for name, sub in subsets.items():
+        s = engine.score(model, sub, bs=32, device=env.device, workers=env.workers, desc=f'official on {name}')
+        out['official_eer'][name] = engine.evaluate_scores(s, sub)
+        log.info('official checkpoint on %s subset: EER %.2f%%', name, out['official_eer'][name]['eer'])
+    del model; _free()
+    json.dump(out, open(os.path.join(env.work, 'partDIAG_results.json'), 'w'), indent=1, default=str)
+    return out
+
+
+def diag_tables(out: dict):
+    """(EER per split, audio stats per split x class, label/attack crosstab) as DataFrames."""
+    eer = pd.DataFrame([{'split': k, 'n': v['n'], 'official EER %': round(v['eer'], 2)} for k, v in out['official_eer'].items()])
+    st = pd.DataFrame([{'split': sp, 'label': 'bona' if lab == '1' else 'spoof',
+                        **{k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items()}}
+                       for sp, d in out['stats'].items() for lab, r in d.items()])
+    ct = pd.DataFrame([{'split': sp, 'label': lab, **cols} for sp, d in out['crosstab'].items() for lab, cols in d.items()]).fillna(0)
+    return eer, st, ct
+
+
 # ------------------------------------------------------------------------------------------ CLI
 def run_all(cfg: dict, env: Env, display=print):
     """Run every enabled part in order (what the notebook does cell by cell)."""
@@ -345,6 +421,9 @@ def run_all(cfg: dict, env: Env, display=print):
     if R['C']:
         from .ablation import summarize
         display(summarize(ablation(cfg, env)))
+    if R.get('DIAG'):
+        for t in diag_tables(diag_data(cfg, env)):
+            display(t)
     if R.get('VI'):
         display(vi_table(vi_zeroshot(cfg, env)))
     if R['L']:
