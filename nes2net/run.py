@@ -10,6 +10,7 @@ Each function takes the preset config (``nes2net.presets.get``) and the runtime 
   eval_trained()    part B evaluation -> partB_results.json
   ablation()        part C   -> partC_ablation.csv / .png
   layer_study()     part C2  -> partC_layers.csv
+  vi_zeroshot()     Vietnamese zero-shot probe + English control -> partVI_results.json
 """
 from __future__ import annotations
 
@@ -281,6 +282,52 @@ def layer_study(cfg: dict, env: Env) -> pd.DataFrame:
     return df
 
 
+# ------------------------------------------------------------------------------------------ VI
+def vi_zeroshot(cfg: dict, env: Env) -> dict:
+    """Official checkpoint, zero-shot, on text-matched FLEURS-vs-TTS probes (see nes2net/tts_probe.py)."""
+    from .tts_probe import build_probe
+    v = cfg['VI']
+    path = os.path.join(env.work, 'partVI_results.json')
+    res = {}
+    probes = {}
+    for name, lang, tts in v['probes']:                 # synthesise first, then load the detector
+        probes[name] = build_probe(lang, tts, os.path.join(env.tmp, 'tts_probe', lang), split=v['split'],
+                                   limit=v['limit'], device=env.device, log=log.info)
+        _free()
+    model = _official_model(cfg, env)
+    for name, sets in probes.items():
+        for variant, items in sets.items():
+            for full in ([False, True] if v['full_utt'] else [False]):
+                tag = f'{name} | {variant} | {"full utt" if full else "4s"}'
+                s = engine.score(model, items, bs=1 if full else 32, device=env.device, full=full,
+                                 workers=env.workers, desc=tag)
+                engine.write_scores(s, os.path.join(env.work, f'VI_{_tag(name)}_{variant}_{"full" if full else "4s"}.txt'))
+                r = engine.evaluate_scores(s, items, by_attack=False)
+                for g in ('male', 'female'):
+                    sub = [it for it in items if it.label == 0 or str(it.meta.get('gender', '')).lower() == g]
+                    sub_b = [it for it in sub if it.label == 1]
+                    if sub_b:
+                        r[f'eer_bona_{g}'] = engine.evaluate_scores(s, sub, by_attack=False)['eer']
+                sb = np.array([s[it.key] for it in items if it.label == 1])
+                ss = np.array([s[it.key] for it in items if it.label == 0])
+                r['score_mean_bona'], r['score_mean_spoof'] = float(sb.mean()), float(ss.mean())
+                res[tag] = r
+                log.info('%s: EER %.2f%% (n=%d)', tag, r['eer'], r['n'])
+                json.dump(res, open(path, 'w'), indent=1)
+    del model; _free()
+    return res
+
+
+def vi_table(res: dict) -> pd.DataFrame:
+    rows = []
+    for k, r in res.items():
+        probe, variant, proto = [x.strip() for x in k.split('|')]
+        rows.append({'probe': probe, 'audio': variant, 'window': proto, 'n': r['n'], 'EER %': round(r['eer'], 2),
+                     'minDCF': round(r['minDCF'], 4), 'mean score bona': round(r['score_mean_bona'], 2),
+                     'mean score TTS': round(r['score_mean_spoof'], 2)})
+    return pd.DataFrame(rows)
+
+
 # ------------------------------------------------------------------------------------------ CLI
 def run_all(cfg: dict, env: Env, display=print):
     """Run every enabled part in order (what the notebook does cell by cell)."""
@@ -298,6 +345,8 @@ def run_all(cfg: dict, env: Env, display=print):
     if R['C']:
         from .ablation import summarize
         display(summarize(ablation(cfg, env)))
+    if R.get('VI'):
+        display(vi_table(vi_zeroshot(cfg, env)))
     if R['L']:
         df = layer_study(cfg, env)
         display(df.groupby('layers')[['dev_eer', 'itw_eer']].agg(['mean', 'std']).round(2))
