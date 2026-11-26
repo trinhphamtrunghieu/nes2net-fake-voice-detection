@@ -72,3 +72,46 @@ def test_diag_data_with_fakes(tmp_path, monkeypatch):
     assert out['crosstab']['train']['1'] == {'-': 4} and out['stats']['dev']['1']['formats'] == {'FLAC/PCM_16': 4}
     eer, st, ct = run.diag_tables(out)
     assert len(eer) == 3 and len(st) == 6 and len(ct) == 6
+
+
+def test_diag_train_with_fakes(tmp_path, monkeypatch):
+    import io, soundfile as sf, huggingface_hub
+    from nes2net import run, presets, datasets_zoo, model as M
+    from nes2net.data import Item
+    from nes2net.env import Env
+    from tests.test_pipeline import _tiny_model
+    rng = np.random.default_rng(3)
+    def wav(n):
+        b = io.BytesIO(); sf.write(b, (rng.standard_normal(n) * 0.05).astype(np.float32), 16000, format='FLAC'); return b.getvalue()
+    pool = {s: [Item(f'{s}_{i}', wav(8000), int(i % 3 == 0)) for i in range(18)] for s in ('tr', 'dv')}
+    monkeypatch.setattr(datasets_zoo, 'get_items', lambda spec, cache_dir=None: pool['tr' if 'train' in spec else 'dv'])
+    monkeypatch.setattr(run, '_build_train_model', lambda cfg, device='cuda': _tiny_model())
+    monkeypatch.setattr(M, 'load_official_checkpoint', lambda path, **kw: _tiny_model().eval())
+    monkeypatch.setattr(huggingface_hub, 'hf_hub_download', lambda *a, **k: 'unused')
+    monkeypatch.setattr(run, '_pos_conv_check', lambda m, name: {'loaded_ok': True})
+    env = Env('local', str(tmp_path / 'w'), str(tmp_path / 't'), 0, 'cpu')
+    os.makedirs(env.work); os.makedirs(env.tmp)
+    cfg = presets.get('diag_train', 'local', {'DT': {'n_train': 12, 'n_dev': 6, 'n_score': 6, 'bs': 4,
+                                                     'variants': [['ft', 'official', 1, {'amp': False}],
+                                                                  ['x', 'xlsr', 1, {'amp': False}]]}})
+    out = run.diag_train(cfg, env)
+    assert set(out['official']) == {f'{s}/{m}' for s in ('train', 'dev') for m in ('eval', 'bn_batch', 'train')}
+    assert set(out['variants']) == {'ft', 'x'} and len(out['variants']['x']['history']) == 1
+    assert not any(f.endswith('.pth') for _, _, fs in os.walk(env.work) for f in fs)
+    t = run.diag_train_table(out)
+    assert list(t['model']) == ['official ckpt', 'ft', 'x']
+
+
+def test_bn_batch_mode_keeps_running_stats():
+    from nes2net import run
+    from nes2net.backend import build_backend
+    m = build_backend('nes2net_x', input_channel=64).eval()
+    bn = next(x for x in m.modules() if isinstance(x, torch.nn.BatchNorm1d))
+    before = bn.running_mean.clone()
+    run._set_mode(m, 'bn_batch')
+    assert bn.training and not m.training
+    with torch.no_grad():
+        m(torch.randn(4, 64, 30) * 5 + 3)
+    assert torch.equal(bn.running_mean, before)
+    run._set_mode(m, 'eval')
+    assert not bn.training and bn.momentum == 0.1

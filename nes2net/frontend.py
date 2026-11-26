@@ -42,18 +42,29 @@ class HFSSL(nn.Module):
         from transformers import AutoModel, Wav2Vec2Config, Wav2Vec2Model
         # 'sdpa' = torch scaled_dot_product_attention (fused / flash kernels on GPU); same math as
         # 'eager' up to floating-point rounding, noticeably faster for 24 layers x 201 frames.
+        self.loading_info = None
+        kw = dict(mask_time_prob=0.0, mask_feature_prob=0.0, layerdrop=0.0, output_loading_info=True)
         try:
             if pretrained and name_or_path:
-                self.model = AutoModel.from_pretrained(
-                    name_or_path, mask_time_prob=0.0, mask_feature_prob=0.0, layerdrop=0.0,
-                    attn_implementation=attn_implementation)
+                self.model, self.loading_info = AutoModel.from_pretrained(
+                    name_or_path, attn_implementation=attn_implementation, **kw)
             else:  # architecture only (weights come from a checkpoint later)
                 self.model = Wav2Vec2Model(Wav2Vec2Config(**XLSR_300M_CONFIG, attn_implementation=attn_implementation))
         except (ValueError, ImportError, TypeError):      # model/transformers without sdpa support
             if pretrained and name_or_path:
-                self.model = AutoModel.from_pretrained(name_or_path, mask_time_prob=0.0, mask_feature_prob=0.0, layerdrop=0.0)
+                self.model, self.loading_info = AutoModel.from_pretrained(name_or_path, **kw)
             else:
                 self.model = Wav2Vec2Model(Wav2Vec2Config(**XLSR_300M_CONFIG))
+        if self.loading_info:
+            # a pretrained front-end with silently re-initialised weights (e.g. the weight-normed
+            # positional conv after a transformers rename) trains, but from a broken starting point
+            miss = [k for k in self.loading_info.get('missing_keys', []) if 'masked_spec_embed' not in k]
+            mism = self.loading_info.get('mismatched_keys', [])
+            if miss or mism:
+                import logging
+                logging.getLogger('nes2net.frontend').warning(
+                    'pretrained %s: %d weights NOT loaded (randomly initialised): %s%s', name_or_path,
+                    len(miss) + len(mism), list(miss)[:8], f' mismatched={list(mism)[:4]}' if mism else '')
         if gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
         self.layer = layer

@@ -8,6 +8,8 @@ or ``python -m nes2net.run --preset ...``.
                English control probe built the same way (~30-45 min on a T4)
   diag_data    sanity check of the ASVspoof2019 LA copy used for training: labels vs attack ids,
                audio statistics per split/class, official-checkpoint EER on train/dev/test (~15 min)
+  diag_train   training-loop check: XLS-R loading, BatchNorm/dropout modes, short paper-recipe runs from
+               the official checkpoint and from XLS-R, AMP vs fp32 (~1.5 h on a T4)
   paper_train  the paper's training recipe (lr 2.5e-7, bs 12, 100 epochs, RawBoost 4, full dev),
                run over many sessions with resume
 
@@ -25,7 +27,7 @@ ABLATION_GROUPS = ['A0_baselines', 'A1_nest_ratio', 'A2_se_ratio', 'A3_pooling',
 _BASE = {
     # which parts run
     'run': {'sanity': True, 'A': False, 'A_full': False, 'B': False, 'B_eval': False, 'C': False, 'L': False,
-            'VI': False, 'DIAG': False},
+            'VI': False, 'DIAG': False, 'DT': False},
     'ckpt': {'repo': 'SpeechAntiSpoofingBenchmarks/Nes2Net', 'file': 'nes2net_x_DF1.65.pth'},
     # A: official checkpoint on subsets. sets: [name, spec, full_utterance]
     'A': {'sets': [
@@ -66,6 +68,13 @@ _BASE = {
     # class, official-checkpoint EER per split). n = random utterances per split for audio stats + EER.
     'DIAG': {'specs': [['train', 'asv19:train'], ['dev', 'asv19:validation'], ['test', 'asv19:test']],
              'n': 2000, 'seed': 0},
+    # DT: training-loop check (see run.diag_train). variants: [name, init 'official'|'xlsr', epochs, overrides
+    # for engine.train]. Paper recipe (lr 2.5e-7, bs 12, RawBoost 4) on a random train subset.
+    'DT': {'train': 'asv19:train', 'dev': 'asv19:validation', 'n_train': 4000, 'n_dev': 1000, 'n_score': 1000,
+           'seed': 0, 'lr': 2.5e-7, 'bs': 12, 'algo': 4,
+           'variants': [['ft_official', 'official', 1, {}],
+                        ['xlsr_amp', 'xlsr', 2, {}],
+                        ['xlsr_fp32', 'xlsr', 1, {'amp': False}]]},
     # L: SSL layer study (cache several layers on smaller subsets)
     'L': {'layers': [8, 12, 18, 24], 'train': 'asv19:train@3000', 'dev': 'asv19:validation@1000',
           'itw': 'hfbench:InTheWild@2000', 'seeds': [0, 1, 2], 'epochs': 15},
@@ -92,6 +101,7 @@ _PRESETS = {
     'full_eval': {'run': {'A_full': True, 'C': True, 'L': True}},
     'vi_zeroshot': {'run': {'VI': True}},
     'diag_data': {'run': {'DIAG': True}},
+    'diag_train': {'run': {'DT': True}},
     'paper_train': {
         'run': {'B': True},
         'B': {'lr': 2.5e-7, 'bs': 12, 'epochs': 100, 'algo': 4, 'dev': 'asv19:validation',

@@ -11,6 +11,7 @@ Each function takes the preset config (``nes2net.presets.get``) and the runtime 
   ablation()        part C   -> partC_ablation.csv / .png
   layer_study()     part C2  -> partC_layers.csv
   diag_data()       training-data sanity check -> partDIAG_results.json, DIAG_audio_*.csv
+  diag_train()      training-loop check (front-end loading, BN modes, short runs) -> partDT_results.json
   vi_zeroshot()     Vietnamese zero-shot probe + English control -> partVI_results.json
 """
 from __future__ import annotations
@@ -404,6 +405,159 @@ def diag_tables(out: dict):
     return eer, st, ct
 
 
+# ------------------------------------------------------------------------------------------ DIAG_TRAIN
+_BN = (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)
+
+
+def _set_mode(model, mode: str):
+    """'eval': normal inference. 'bn_batch': eval, but BatchNorm normalises with the batch's own
+    statistics (momentum 0 -> running stats untouched). 'train': full train mode (dropout on too)."""
+    if mode == 'train':
+        model.train()
+    else:
+        model.eval()
+    for m in model.modules():
+        if isinstance(m, _BN):
+            if mode == 'eval':
+                m.momentum = getattr(m, '_mom0', m.momentum)
+            else:
+                m._mom0 = getattr(m, '_mom0', m.momentum)
+                m.train(); m.momentum = 0.0
+
+
+@torch.no_grad()
+def _score_mode(model, items, mode, env, bs=24, amp=True):
+    _set_mode(model, mode)
+    out = {}
+    for x, y, k in engine._loader(items, bs, workers=env.workers):
+        with torch.autocast('cuda', dtype=torch.float16, enabled=amp and env.device.startswith('cuda')):
+            s = model(x.to(env.device, non_blocking=True))[:, 1].float().cpu().numpy()
+        out.update(zip(k, s.tolist()))
+    _set_mode(model, 'eval')
+    return out
+
+
+def _mode_eers(model, subsets: dict, env, modes=('eval', 'bn_batch', 'train')) -> dict:
+    res = {}
+    for name, items in subsets.items():
+        for mode in modes:
+            r = engine.evaluate_scores(_score_mode(model, items, mode, env), items, by_attack=False)
+            res[f'{name}/{mode}'] = round(r['eer'], 2)
+            log.info('  EER %-6s %-9s %6.2f%%', name, mode, r['eer'])
+    return res
+
+
+def _pos_conv_check(model, ssl_name: str) -> dict:
+    """Compare the positional-conv weight the front-end actually uses with the weight stored in the
+    hub file (weight_g * weight_v / ||weight_v||, weight-norm over all dims but 2). A large difference
+    means the pretrained weights were not loaded and the layer is random."""
+    from huggingface_hub import hf_hub_download, list_repo_files
+    files = list_repo_files(ssl_name)
+    fn = 'model.safetensors' if 'model.safetensors' in files else 'pytorch_model.bin'
+    p = hf_hub_download(ssl_name, fn)
+    if fn.endswith('.safetensors'):
+        from safetensors.torch import load_file
+        sd = load_file(p)
+    else:
+        sd = torch.load(p, map_location='cpu', weights_only=False)
+    g = next((v for k, v in sd.items() if k.endswith('pos_conv_embed.conv.weight_g')
+              or k.endswith('pos_conv_embed.conv.parametrizations.weight.original0')), None)
+    v = next((v for k, v in sd.items() if k.endswith('pos_conv_embed.conv.weight_v')
+              or k.endswith('pos_conv_embed.conv.parametrizations.weight.original1')), None)
+    if g is None or v is None:
+        return {'file': fn, 'error': 'pos_conv weight_g/weight_v not found in file'}
+    v = v.float()
+    w_file = v * (g.float() / v.norm(dim=(0, 1), keepdim=True))
+    w_model = model.encoder.pos_conv_embed.conv.weight.detach().float().cpu()
+    d = (w_model - w_file).abs().max().item()
+    return {'file': fn, 'max_abs_diff': d, 'w_file_absmean': w_file.abs().mean().item(),
+            'w_model_absmean': w_model.abs().mean().item(), 'loaded_ok': d < 1e-4 * max(w_file.abs().max().item(), 1)}
+
+
+def diag_train(cfg: dict, env: Env) -> dict:
+    """Is the training loop (engine.train) broken? Small, controlled runs on ASVspoof2019 LA:
+
+      0. front-end check: XLS-R weights reported missing by transformers + direct comparison of the
+         positional conv with the hub file.
+      1. official checkpoint: EER on balanced train / dev subsets in three modes (eval, BatchNorm with
+         batch statistics, full train mode). All should be ~0 %.
+      2. variants (name, init, epochs, overrides) trained with the real engine.train (paper recipe on a
+         random train subset); afterwards the same three-mode EERs. Reading:
+           * 'official' init degrades after 1 epoch     -> the loop damages a good model (code bug)
+           * train-subset EER good, dev bad             -> genuine over-fitting / data difference
+           * eval-mode EER bad but bn_batch good        -> BatchNorm running statistics are the problem
+           * AMP variant bad, fp32 variant fine         -> fp16 numerics
+    """
+    from .data import balanced_subset
+    from .datasets_zoo import get_items
+    from .model import load_official_checkpoint
+    from huggingface_hub import hf_hub_download
+    d, b = cfg['DT'], cfg['B']
+    root = os.path.join(env.work, 'diag_train'); os.makedirs(root, exist_ok=True)
+    out = {'config': d, 'variants': {}}
+    dump = lambda: json.dump(out, open(os.path.join(env.work, 'partDT_results.json'), 'w'), indent=1, default=str)
+    rng = np.random.default_rng(d['seed'])
+    shuf = lambda xs: [xs[i] for i in rng.permutation(len(xs))]     # mixed classes in every BN batch
+    tr_all, dv_all = get_items(d['train']), get_items(d['dev'])
+    tr = balanced_subset(tr_all, d['n_train'], seed=d['seed'])                     # natural class ratio
+    dv = balanced_subset(dv_all, d['n_dev'], seed=d['seed'])
+    tr_keys = {it.key for it in tr}
+    score_sets = {'train': shuf(balanced_subset([it for it in tr_all if it.key in tr_keys], d['n_score'],
+                                                seed=d['seed'] + 1, bona_frac=0.5)),
+                  'dev': shuf(balanced_subset(dv_all, d['n_score'], seed=d['seed'] + 1, bona_frac=0.5))}
+    log.info('DT: train subset %d (bona %d), dev subset %d, score sets %s', len(tr), sum(i.label for i in tr),
+             len(dv), {k: len(v) for k, v in score_sets.items()})
+
+    # 0. front-end loading
+    m = _build_train_model(cfg, env.device)
+    li = m.ssl_model.loading_info or {}
+    out['frontend'] = {'missing_keys': list(li.get('missing_keys', [])), 'unexpected_keys': list(li.get('unexpected_keys', []))[:20],
+                       'mismatched_keys': [str(x) for x in li.get('mismatched_keys', [])]}
+    try:
+        out['frontend']['pos_conv'] = _pos_conv_check(m.ssl_model.model, b['ssl'])
+    except Exception as e:                                       # never let the check kill the run
+        out['frontend']['pos_conv'] = {'error': repr(e)}
+    log.info('DT front-end: %s', out['frontend'])
+    del m; _free(); dump()
+
+    # 1. official checkpoint
+    ck = hf_hub_download(cfg['ckpt']['repo'], cfg['ckpt']['file'])
+    gc_on = resolve_grad_ckpt(b.get('grad_ckpt', 'auto'), env.device)
+    m = load_official_checkpoint(ck, gradient_checkpointing=gc_on).to(env.device)
+    log.info('DT official checkpoint:')
+    out['official'] = _mode_eers(m, score_sets, env)
+    del m; _free(); dump()
+
+    # 2. variants
+    for name, init, epochs, ov in d['variants']:
+        log.info('DT variant %s: init=%s epochs=%d overrides=%s', name, init, epochs, ov)
+        engine.set_seed(d['seed'])
+        m = load_official_checkpoint(ck, gradient_checkpointing=gc_on) if init == 'official' else _build_train_model(cfg, env.device)
+        kw = dict(epochs=epochs, lr=d['lr'], bs=d['bs'], algo=d['algo'], device=env.device, amp=True,
+                  workers=env.workers, resume=False, keep_best_k=1, log_every=50, tb=False, eval_bs=b.get('eval_bs'))
+        kw.update(ov)
+        vdir = os.path.join(root, name)
+        shutil.rmtree(vdir, ignore_errors=True)
+        hist = engine.train(m, tr, dv, vdir, **kw)
+        r = {'init': init, 'overrides': ov, 'history': hist}
+        log.info('DT %s after training (final weights):', name)
+        r['eer'] = _mode_eers(m, score_sets, env)
+        out['variants'][name] = r
+        for f in glob.glob(os.path.join(vdir, '*.pth')):        # 1.2 GB each; logs are kept
+            os.remove(f)
+        del m; _free(); dump()
+    return out
+
+
+def diag_train_table(out: dict) -> pd.DataFrame:
+    rows = [{'model': 'official ckpt', **out.get('official', {})}]
+    for name, r in out.get('variants', {}).items():
+        last = r['history'][-1] if r['history'] else {}
+        rows.append({'model': name, **r['eer'], 'train_loss': round(last.get('train_loss', float('nan')), 4),
+                     'val_loss': round(last.get('val_loss_wo_aug', float('nan')), 4)})
+    return pd.DataFrame(rows)
+
+
 # ------------------------------------------------------------------------------------------ CLI
 def run_all(cfg: dict, env: Env, display=print):
     """Run every enabled part in order (what the notebook does cell by cell)."""
@@ -424,6 +578,8 @@ def run_all(cfg: dict, env: Env, display=print):
     if R.get('DIAG'):
         for t in diag_tables(diag_data(cfg, env)):
             display(t)
+    if R.get('DT'):
+        display(diag_train_table(diag_train(cfg, env)))
     if R.get('VI'):
         display(vi_table(vi_zeroshot(cfg, env)))
     if R['L']:
