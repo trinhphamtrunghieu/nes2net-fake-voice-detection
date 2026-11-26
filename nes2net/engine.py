@@ -84,17 +84,26 @@ def write_scores(scores: dict, path: str):
 
 @torch.no_grad()
 def val_loss(model, loader, crit, device, amp=True, return_eer=False):
-    """Weighted-CE loss on a loader; with return_eer=True also the EER (%) of logit[:, 1]."""
-    model.eval(); tot, n = 0.0, 0
+    """Exact weighted-CE loss over the full loader (invariant to batching/class order).
+    With return_eer=True also returns the EER (%) of logit[:, 1]."""
+    model.eval()
+    w = getattr(crit, 'weight', None)
+    crit_sum = nn.CrossEntropyLoss(weight=w, reduction='sum') if isinstance(crit, nn.CrossEntropyLoss) else None
+    tot, denom = 0.0, 0.0
     S, Y = [], []
     for x, y, _ in loader:
         x, y = x.to(device), torch.as_tensor(y).long().to(device)
         with torch.autocast('cuda', dtype=torch.float16, enabled=amp and device.startswith('cuda')):
             out = model(x)
-        tot += crit(out.float(), y).item() * x.size(0); n += x.size(0)
+        if crit_sum is not None:
+            tot += crit_sum(out.float(), y).item()
+            denom += w[y].sum().item() if w is not None else float(x.size(0))
+        else:
+            tot += crit(out.float(), y).item() * x.size(0)
+            denom += float(x.size(0))
         if return_eer:
             S.append(out[:, 1].float().cpu()); Y.append(y.cpu())
-    loss = tot / max(n, 1)
+    loss = tot / max(denom, 1e-12)
     if not return_eer:
         return loss
     s, yy = torch.cat(S).numpy(), torch.cat(Y).numpy()
@@ -167,7 +176,7 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
     tr = _loader(train_items, bs, algo=algo, shuffle=True, workers=workers, drop_last=True)
     dv0 = _loader(dev_items, eval_bs, algo=0, workers=workers)
     dv1 = _loader(dev_items, eval_bs, algo=algo, workers=workers) if val_aug and algo else None
-    best0 = best1 = math.inf
+    best0 = best1 = best_eer = math.inf
     hist, start_ep, start_step, carry = [], 1, 0, (0.0, 0)
     state_path = os.path.join(out_dir, 'last_state.pth')
 
@@ -175,13 +184,13 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
         tmp = state_path + '.tmp'
         torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'scaler': scaler.state_dict(),
                     'epoch': ep, 'step': step, 'run': run, 'n': n, 'best0': best0, 'best1': best1,
-                    'hist': hist, 'rng': torch.get_rng_state()}, tmp)
+                    'best_eer': best_eer, 'hist': hist, 'rng': torch.get_rng_state()}, tmp)
         os.replace(tmp, state_path)            # atomic: a disconnect never leaves a broken file
 
     if resume and os.path.exists(state_path):
         st = torch.load(state_path, map_location='cpu', weights_only=False)
         model.load_state_dict(st['model']); opt.load_state_dict(st['opt']); scaler.load_state_dict(st['scaler'])
-        best0, best1, hist = st['best0'], st['best1'], st['hist']
+        best0, best1, best_eer, hist = st['best0'], st['best1'], st.get('best_eer', math.inf), st['hist']
         torch.set_rng_state(st['rng'])
         if st['step'] == 0:                      # saved at end of epoch
             start_ep = st['epoch'] + 1
@@ -261,6 +270,9 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
         if dv1 is not None and l1 <= best1: best1, save = l1, True
         if save:
             torch.save(model.state_dict(), os.path.join(out_dir, f'epoch_{ep}.pth'))
+        if not math.isnan(e0) and e0 <= best_eer:
+            best_eer = e0
+            torch.save(model.state_dict(), os.path.join(out_dir, 'best_eer.pth'))
         h = dict(epoch=ep, train_loss=run / max(n, 1), val_loss_wo_aug=l0, val_loss_w_aug=l1,
                  val_eer_wo_aug=e0, val_eer_w_aug=e1, saved=save, sec=time.time() - te,
                  train_sec=t_train, val_sec=t_val)
