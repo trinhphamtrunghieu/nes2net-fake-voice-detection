@@ -69,7 +69,7 @@ score = m(wave_4s_16k[None])[:, 1]     # cao hơn = bona fide
 
 3. Ghi đè bất kỳ tham số nào qua `OVERRIDES`, ví dụ `{'B': {'lr': 2e-6}, 'run': {'L': False}}`.
    Cấu hình đầy đủ nằm ở `nes2net/presets.py`; chỉ `time_budget_h` thay đổi theo nền tảng.
-4. **Train nhiều phiên:** chạy lại notebook với cùng preset là train tiếp từ `WORK/runB/last_state.pth`. Với các lần
+4. **Train nhiều phiên:** chạy lại notebook với cùng preset là train tiếp từ `WORK/runB2/last_state.pth`. Với các lần
    train dài, đặt `REPO_REF` thành một commit cố định để code không đổi giữa các phiên.
 
 **Sửa code:** chỉ sửa trong `nes2net/` rồi push. Notebook clone repo lúc chạy nên không cần sửa notebook, trừ khi bạn

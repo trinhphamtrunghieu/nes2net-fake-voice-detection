@@ -115,3 +115,33 @@ def test_bn_batch_mode_keeps_running_stats():
     assert torch.equal(bn.running_mean, before)
     run._set_mode(m, 'eval')
     assert not bn.training and bn.momentum == 0.1
+
+
+def test_diag_ckpt_with_fakes(tmp_path, monkeypatch):
+    import io, soundfile as sf
+    from nes2net import run, presets, datasets_zoo, model as M
+    from nes2net.data import Item
+    from nes2net.env import Env
+    from tests.test_pipeline import _tiny_model
+    rng = np.random.default_rng(4)
+    def wav():
+        b = io.BytesIO(); sf.write(b, (rng.standard_normal(8000) * 0.05).astype(np.float32), 16000, format='FLAC'); return b.getvalue()
+    pool = [Item(f'u{i}', wav(), int(i % 2)) for i in range(12)]
+    monkeypatch.setattr(datasets_zoo, 'get_items', lambda spec, cache_dir=None: pool)
+    tiny = _tiny_model()
+    monkeypatch.setattr(M, 'SSLNes2Net', lambda **kw: _tiny_model())
+    env = Env('local', str(tmp_path / 'w'), str(tmp_path / 't'), 0, 'cpu')
+    os.makedirs(env.work + '/runB'); os.makedirs(env.tmp)
+    torch.save({'model': tiny.state_dict(), 'epoch': 3}, env.work + '/runB/last_state.pth')
+    out = run.diag_ckpt(presets.get('diag_ckpt', 'local', {'DC': {'path': 'runB/last_state.pth', 'n': 8}}), env)
+    assert set(out['eer']) == {f'{s}/{m}' for s in ('train', 'dev') for m in ('eval', 'bn_batch', 'train')}
+
+
+def test_ssl_dropout_matches_fairseq_by_default():
+    from nes2net.model import SSLNes2Net
+    m = SSLNes2Net(pretrained_ssl=False)
+    ps = [x.p for x in m.ssl_model.model.modules() if isinstance(x, torch.nn.Dropout)]
+    att = [x.dropout for n, x in m.ssl_model.model.named_modules() if n.endswith('attention')]
+    assert ps and all(p == 0 for p in ps) and att and all(a == 0 for a in att)
+    m2 = SSLNes2Net(pretrained_ssl=False, ssl_dropout='hf')
+    assert max(x.p for x in m2.ssl_model.model.modules() if isinstance(x, torch.nn.Dropout)) == 0.1

@@ -19,11 +19,11 @@ class SSLNes2Net(nn.Module):
 
     def __init__(self, ssl_name='facebook/wav2vec2-xls-r-300m', ssl_layer='last',
                  backend='nes2net_x', pretrained_ssl=True, freeze_ssl=False,
-                 gradient_checkpointing=False, attn_implementation='sdpa', **backend_kw):
+                 gradient_checkpointing=False, attn_implementation='sdpa', ssl_dropout='fairseq', **backend_kw):
         super().__init__()
         self.ssl_model = HFSSL(ssl_name, layer=ssl_layer, pretrained=pretrained_ssl,
                                gradient_checkpointing=gradient_checkpointing,
-                               attn_implementation=attn_implementation)
+                               attn_implementation=attn_implementation, dropout=ssl_dropout)
         self.freeze_ssl = freeze_ssl
         if freeze_ssl:
             for p in self.ssl_model.model.parameters():

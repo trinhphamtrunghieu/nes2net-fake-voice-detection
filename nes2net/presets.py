@@ -10,6 +10,7 @@ or ``python -m nes2net.run --preset ...``.
                audio statistics per split/class, official-checkpoint EER on train/dev/test (~15 min)
   diag_train   training-loop check: XLS-R loading, BatchNorm/dropout modes, short paper-recipe runs from
                the official checkpoint and from XLS-R, AMP vs fp32 (~1.5 h on a T4)
+  diag_ckpt    your own checkpoint (DC.path) on train/dev subsets: over-fitting or train/eval mismatch? (~5 min)
   paper_train  the paper's training recipe (lr 2.5e-7, bs 12, 100 epochs, RawBoost 4, full dev),
                run over many sessions with resume
 
@@ -27,7 +28,7 @@ ABLATION_GROUPS = ['A0_baselines', 'A1_nest_ratio', 'A2_se_ratio', 'A3_pooling',
 _BASE = {
     # which parts run
     'run': {'sanity': True, 'A': False, 'A_full': False, 'B': False, 'B_eval': False, 'C': False, 'L': False,
-            'VI': False, 'DIAG': False, 'DT': False},
+            'VI': False, 'DIAG': False, 'DT': False, 'DC': False},
     'ckpt': {'repo': 'SpeechAntiSpoofingBenchmarks/Nes2Net', 'file': 'nes2net_x_DF1.65.pth'},
     # A: official checkpoint on subsets. sets: [name, spec, full_utterance]
     'A': {'sets': [
@@ -49,7 +50,9 @@ _BASE = {
           'train': 'asv19:train', 'dev': 'asv19:validation@6000',
           'lr': 1e-6, 'bs': 12, 'epochs': 100, 'algo': 4, 'time_budget_h': None,
           'keep_best_k': 3, 'save_every_steps': 500, 'avg_k': 3, 'log_every': 50,
-          'out': 'runB', 'resume_from_kaggle_input': True,
+          # ssl_dropout 'fairseq' = all XLS-R dropouts 0, as in the official code (HF hub config has 0.1).
+          # out 'runB2': runs started before this fix (out 'runB', dropout 0.1) are not resumed.
+          'ssl_dropout': 'fairseq', 'out': 'runB2', 'resume_from_kaggle_input': True,
           # speed settings (do not change the recipe): gradient checkpointing only when VRAM < 22 GB,
           # fused SDPA attention, bigger batch for forward-only validation
           'grad_ckpt': 'auto', 'attn': 'sdpa', 'eval_bs': 48,
@@ -75,6 +78,9 @@ _BASE = {
            'variants': [['ft_official', 'official', 1, {}],
                         ['xlsr_amp', 'xlsr', 2, {}],
                         ['xlsr_fp32', 'xlsr', 1, {'amp': False}]]},
+    # DC: score one trained checkpoint (path relative to WORK; best_eer.pth, epoch_N.pth or last_state.pth)
+    'DC': {'path': 'runB2/best_eer.pth', 'specs': [['train', 'asv19:train'], ['dev', 'asv19:validation']],
+           'n': 1000, 'seed': 0},
     # L: SSL layer study (cache several layers on smaller subsets)
     'L': {'layers': [8, 12, 18, 24], 'train': 'asv19:train@3000', 'dev': 'asv19:validation@1000',
           'itw': 'hfbench:InTheWild@2000', 'seeds': [0, 1, 2], 'epochs': 15},
@@ -102,6 +108,7 @@ _PRESETS = {
     'vi_zeroshot': {'run': {'VI': True}},
     'diag_data': {'run': {'DIAG': True}},
     'diag_train': {'run': {'DT': True}},
+    'diag_ckpt': {'run': {'sanity': False, 'DC': True}},
     'paper_train': {
         'run': {'B': True},
         'B': {'lr': 2.5e-7, 'bs': 12, 'epochs': 100, 'algo': 4, 'dev': 'asv19:validation',

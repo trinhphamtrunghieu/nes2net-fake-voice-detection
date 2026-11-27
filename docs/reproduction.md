@@ -55,3 +55,17 @@
 
 ### 4.3 Ablation (frozen XLS-R L24, mean ± std, 3 seed)
 Xem `partC_ablation.csv` / `partC_ablation.png`.
+
+## Lỗi dropout của front-end (đã sửa)
+
+Các lần train `paper_train` đầu tiên (thư mục `runB/`) có train loss giảm nhưng val loss tăng, val EER kẹt ở 26–50%.
+Nguyên nhân: config HF của `facebook/wav2vec2-xls-r-300m` bật dropout 0.1 (hidden, attention, feat_proj).
+File `xlsr2_300m.pt` của fairseq mà code gốc fine-tune lại đặt mọi dropout và layerdrop bằng 0.
+
+| checkpoint chính thức, 1,200 câu train | loss | EER |
+|---|---|---|
+| chế độ eval | 0.0005 | 0.00% |
+| chế độ train, dropout HF 0.1 | 0.96 (RawBoost: 1.37) | 8.6% (18.5%) |
+| chế độ train, dropout fairseq 0 | 0.0026 | 0.00% |
+
+Từ bản sửa, `B.ssl_dropout='fairseq'` là mặc định (mọi dropout = 0), và lần train mới ghi vào `runB2/`.

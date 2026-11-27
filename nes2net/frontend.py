@@ -21,9 +21,48 @@ XLSR_300M_CONFIG = dict(
     conv_dim=(512,) * 7, conv_stride=(5, 2, 2, 2, 2, 2, 2), conv_kernel=(10, 3, 3, 3, 3, 2, 2),
     conv_bias=True, num_conv_pos_embeddings=128, num_conv_pos_embedding_groups=16,
     do_stable_layer_norm=True, layer_norm_eps=1e-5,
-    hidden_dropout=0.1, attention_dropout=0.1, activation_dropout=0.0, feat_proj_dropout=0.1,
+    # dropouts as in the fairseq xlsr2_300m.pt the official code fine-tunes: all 0 (checked from its cfg)
+    hidden_dropout=0.0, attention_dropout=0.0, activation_dropout=0.0, feat_proj_dropout=0.0,
     layerdrop=0.0, mask_time_prob=0.0, mask_feature_prob=0.0, apply_spec_augment=False,
 )
+
+
+DROPOUT_PRESETS = {
+    # HF hub config of facebook/wav2vec2-xls-r-300m (what from_pretrained gives)
+    'hf': dict(hidden=0.1, attention=0.1, activation=0.0, feat_proj=0.1, layerdrop=0.0),
+    'zero': dict(hidden=0.0, attention=0.0, activation=0.0, feat_proj=0.0, layerdrop=0.0),
+    # cfg stored in fairseq's xlsr2_300m.pt (what the official Nes2Net code fine-tunes): dropout,
+    # attention_dropout, activation_dropout, dropout_input, encoder_layerdrop are all 0.0.
+    # With the HF values the official checkpoint's train-mode loss is 0.96-1.37 instead of 0.002.
+    'fairseq': dict(hidden=0.0, attention=0.0, activation=0.0, feat_proj=0.0, layerdrop=0.0),
+}
+
+
+def set_ssl_dropout(model, hidden=None, attention=None, activation=None, feat_proj=None, layerdrop=None) -> dict:
+    """Set the dropout probabilities of an HF Wav2Vec2/WavLM model in place (modules + config).
+
+    fairseq -> HF: dropout -> hidden (after pos-conv, after attention, after FFN), attention_dropout ->
+    attention, activation_dropout -> activation (inside FFN), dropout_input -> feat_proj,
+    encoder_layerdrop -> layerdrop.  None leaves a value unchanged."""
+    c = model.config
+    for name, attr in (('hidden', 'hidden_dropout'), ('attention', 'attention_dropout'),
+                       ('activation', 'activation_dropout'), ('feat_proj', 'feat_proj_dropout'),
+                       ('layerdrop', 'layerdrop')):
+        v = locals()[name]
+        if v is not None:
+            setattr(c, attr, float(v))
+    for n, m in model.named_modules():
+        if isinstance(m, nn.Dropout):
+            if n.endswith('feature_projection.dropout'):
+                m.p = c.feat_proj_dropout
+            elif n.endswith('intermediate_dropout'):
+                m.p = c.activation_dropout
+            elif n.endswith(('encoder.dropout', '.dropout', 'output_dropout')):
+                m.p = c.hidden_dropout
+        if n.endswith('attention') and isinstance(getattr(m, 'dropout', None), float):
+            m.dropout = c.attention_dropout
+    return {'hidden': c.hidden_dropout, 'attention': c.attention_dropout, 'activation': c.activation_dropout,
+            'feat_proj': c.feat_proj_dropout, 'layerdrop': c.layerdrop}
 
 
 class HFSSL(nn.Module):
@@ -37,7 +76,7 @@ class HFSSL(nn.Module):
 
     def __init__(self, name_or_path: str | None = 'facebook/wav2vec2-xls-r-300m',
                  layer='last', pretrained: bool = True, gradient_checkpointing: bool = False,
-                 attn_implementation: str = 'sdpa'):
+                 attn_implementation: str = 'sdpa', dropout='fairseq'):
         super().__init__()
         from transformers import AutoModel, Wav2Vec2Config, Wav2Vec2Model
         # 'sdpa' = torch scaled_dot_product_attention (fused / flash kernels on GPU); same math as
@@ -65,6 +104,9 @@ class HFSSL(nn.Module):
                 logging.getLogger('nes2net.frontend').warning(
                     'pretrained %s: %d weights NOT loaded (randomly initialised): %s%s', name_or_path,
                     len(miss) + len(mism), list(miss)[:8], f' mismatched={list(mism)[:4]}' if mism else '')
+        # preset name ('fairseq' = official setting, 'hf', 'zero') or dict of set_ssl_dropout kwargs; None = as loaded
+        if dropout is not None:
+            self.dropout = set_ssl_dropout(self.model, **(DROPOUT_PRESETS[dropout] if isinstance(dropout, str) else dropout))
         if gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
         self.layer = layer

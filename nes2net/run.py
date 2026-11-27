@@ -6,11 +6,12 @@ Each function takes the preset config (``nes2net.presets.get``) and the runtime 
   sanity()          back-end equals official code, params / MACs
   eval_official()   part A   -> partA_results.json, A_*.txt score files
   eval_official_full()  part A (full sets) -> partA_full_results.json, A_full/
-  train()           part B   -> runB/ (checkpoints, last_state.pth, train.log, metrics.jsonl, tb/)
+  train()           part B   -> runB2/ (checkpoints, last_state.pth, train.log, metrics.jsonl, tb/)
   eval_trained()    part B evaluation -> partB_results.json
   ablation()        part C   -> partC_ablation.csv / .png
   layer_study()     part C2  -> partC_layers.csv
   diag_data()       training-data sanity check -> partDIAG_results.json, DIAG_audio_*.csv
+  diag_ckpt()       your trained checkpoint on train/dev subsets in eval/bn_batch/train mode -> partDC_results.json
   diag_train()      training-loop check (front-end loading, BN modes, short runs) -> partDT_results.json
   vi_zeroshot()     Vietnamese zero-shot probe + English control -> partVI_results.json
 """
@@ -131,8 +132,8 @@ def results_table(res: dict) -> pd.DataFrame:
 
 # ------------------------------------------------------------------------------------------ B
 def _restore_from_kaggle_input(out: str):
-    """Kaggle: a kernel can mount its own previous output; copy runB/ from there to resume."""
-    prev = sorted(glob.glob('/kaggle/input/**/runB/last_state.pth', recursive=True))
+    """Kaggle: a kernel can mount its own previous output; copy <out>/ from there to resume."""
+    prev = sorted(glob.glob(f'/kaggle/input/**/{os.path.basename(out)}/last_state.pth', recursive=True))
     if prev and not os.path.exists(os.path.join(out, 'last_state.pth')):
         src = os.path.dirname(prev[0]); os.makedirs(out, exist_ok=True)
         for f in os.listdir(src):
@@ -156,7 +157,7 @@ def _build_train_model(cfg, device='cuda'):
     b = cfg['B']
     gc = resolve_grad_ckpt(b.get('grad_ckpt', 'auto'), device)
     return SSLNes2Net(b['ssl'], backend=b['backend'], gradient_checkpointing=gc,
-                      attn_implementation=b.get('attn', 'sdpa'))
+                      attn_implementation=b.get('attn', 'sdpa'), ssl_dropout=b.get('ssl_dropout', 'fairseq'))
 
 
 def train(cfg: dict, env: Env):
@@ -549,6 +550,31 @@ def diag_train(cfg: dict, env: Env) -> dict:
     return out
 
 
+def diag_ckpt(cfg: dict, env: Env) -> dict:
+    """EER of one of YOUR trained checkpoints on balanced train / dev subsets, in eval, bn_batch and
+    train mode. Train good + dev bad in eval mode = genuine over-fitting; train bad in eval mode but
+    good in train mode = a train/eval mismatch (dropout / BatchNorm)."""
+    from .data import balanced_subset
+    from .datasets_zoo import get_items
+    from .model import SSLNes2Net
+    d = cfg['DC']
+    path = d['path'] if os.path.isabs(d['path']) else os.path.join(env.work, d['path'])
+    sd = torch.load(path, map_location='cpu', weights_only=False)
+    sd = sd.get('model', sd) if isinstance(sd, dict) else sd          # last_state.pth or a plain state_dict
+    m = SSLNes2Net(pretrained_ssl=False, backend=cfg['B']['backend'])
+    m.load_state_dict(sd)
+    m.to(env.device)
+    rng = np.random.default_rng(d['seed'])
+    shuf = lambda xs: [xs[i] for i in rng.permutation(len(xs))]
+    subs = {name: shuf(balanced_subset(get_items(spec), d['n'], seed=d['seed'], bona_frac=0.5))
+            for name, spec in d['specs']}
+    log.info('DC %s:', path)
+    out = {'path': path, 'eer': _mode_eers(m, subs, env)}
+    json.dump(out, open(os.path.join(env.work, 'partDC_results.json'), 'w'), indent=1)
+    del m; _free()
+    return out
+
+
 def diag_train_table(out: dict) -> pd.DataFrame:
     rows = [{'model': 'official ckpt', **out.get('official', {})}]
     for name, r in out.get('variants', {}).items():
@@ -580,6 +606,8 @@ def run_all(cfg: dict, env: Env, display=print):
             display(t)
     if R.get('DT'):
         display(diag_train_table(diag_train(cfg, env)))
+    if R.get('DC'):
+        display(pd.Series(diag_ckpt(cfg, env)['eer'], name='EER %'))
     if R.get('VI'):
         display(vi_table(vi_zeroshot(cfg, env)))
     if R['L']:
