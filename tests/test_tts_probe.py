@@ -145,3 +145,41 @@ def test_ssl_dropout_matches_fairseq_by_default():
     assert ps and all(p == 0 for p in ps) and att and all(a == 0 for a in att)
     m2 = SSLNes2Net(pretrained_ssl=False, ssl_dropout='hf')
     assert max(x.p for x in m2.ssl_model.model.modules() if isinstance(x, torch.nn.Dropout)) == 0.1
+
+
+def test_dev_aug_cache_is_deterministic_and_reused(tmp_path):
+    import io, soundfile as sf
+    from nes2net.data import Item
+    from nes2net import engine
+    rng = np.random.default_rng(5)
+    def wav(n):
+        b = io.BytesIO(); sf.write(b, (rng.standard_normal(n) * 0.05).astype(np.float32), 16000, format='FLAC'); return b.getvalue()
+    items = [Item(f'd{i}', wav(30000 + 1000 * i), int(i % 2)) for i in range(10)]
+    d = str(tmp_path / 'cache')
+    engine.build_aug_cache(items, d, algo=4, seed=7, workers=0, log=lambda *a: None)
+    ds = engine.CachedWaves(d)
+    assert len(ds) == 10 and ds.keys == [it.key for it in items] and ds.labels == [it.label for it in items]
+    ref = engine._SeededAug(items, 4, 7)
+    x0 = ds[3][0]
+    assert torch.equal(x0, ref[3][0])                       # same seed -> same augmented wave
+    assert not torch.allclose(x0, engine.WaveDataset(items[3:4], algo=0)[0][0])   # it is augmented
+    m = os.path.getmtime(os.path.join(d, 'waves.npy'))
+    engine.build_aug_cache(items, d, algo=4, seed=7, workers=0, log=lambda *a: None)
+    assert os.path.getmtime(os.path.join(d, 'waves.npy')) == m   # reused, not rebuilt
+    engine.build_aug_cache(items[:5], d, algo=4, seed=7, workers=0, log=lambda *a: None)
+    assert len(engine.CachedWaves(d)) == 5                 # different items -> rebuilt
+
+
+def test_train_with_val_aug_cache(tmp_path):
+    import io, soundfile as sf
+    from nes2net.data import Item
+    from nes2net import engine
+    from tests.test_pipeline import _tiny_model
+    rng = np.random.default_rng(6)
+    def wav():
+        b = io.BytesIO(); sf.write(b, (rng.standard_normal(9000) * 0.05).astype(np.float32), 16000, format='FLAC'); return b.getvalue()
+    items = [Item(f'u{i}', wav(), int(i % 2)) for i in range(8)]
+    hist = engine.train(_tiny_model(), items, items, str(tmp_path / 'run'), epochs=1, bs=4, algo=4, device='cpu',
+                        amp=False, workers=0, tb=False, val_aug_cache=str(tmp_path / 'cache'))
+    assert len(hist) == 1 and np.isfinite(hist[0]['val_loss_w_aug'])
+    assert os.path.exists(tmp_path / 'cache' / 'DONE')

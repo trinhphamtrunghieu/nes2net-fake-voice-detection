@@ -171,7 +171,9 @@ def train(cfg: dict, env: Env):
     hist = engine.train(model, tr, dv, out, epochs=b['epochs'], lr=b['lr'], bs=b['bs'], algo=b['algo'],
                         device=env.device, amp=True, workers=env.workers, time_budget_h=b['time_budget_h'],
                         resume=True, keep_best_k=b['keep_best_k'], save_every_steps=b['save_every_steps'],
-                        log_every=b['log_every'], eval_bs=b.get('eval_bs'))
+                        log_every=b['log_every'], eval_bs=b.get('eval_bs'),
+                        val_aug_cache=(os.path.join(env.tmp, f"dev_aug_{_tag(b['dev'])}_algo{b['algo']}")
+                                       if b.get('val_aug_cache', True) else None))
     log.info('%d/%d epochs done; state in %s (rerun to resume)', len(hist), b['epochs'], out)
     del model; _free()
     return hist

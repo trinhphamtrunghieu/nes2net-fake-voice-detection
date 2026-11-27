@@ -69,3 +69,9 @@ File `xlsr2_300m.pt` của fairseq mà code gốc fine-tune lại đặt mọi d
 | chế độ train, dropout fairseq 0 | 0.0026 | 0.00% |
 
 Từ bản sửa, `B.ssl_dropout='fairseq'` là mặc định (mọi dropout = 0), và lần train mới ghi vào `runB2/`.
+
+## Cache tập dev đã augment
+
+"val loss w/ aug" cần RawBoost trên toàn bộ 24,844 câu dev. Code gốc augment lại mỗi epoch; trên runtime 2 CPU, lượt này mất khoảng 35 phút trong khi GPU đứng không.
+Mặc định giờ là `B.val_aug_cache=True`: dev được augment **một lần** (seed cố định theo từng câu), lưu vào `TMP/dev_aug_*`, rồi các epoch sau đọc lại.
+Khác code gốc: bản augment cố định giữa các epoch, nên val loss giữa các epoch so sánh được với nhau. Muốn chạy đúng như code gốc thì đặt `B.val_aug_cache=false`.

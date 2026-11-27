@@ -56,6 +56,8 @@ _BASE = {
           # speed settings (do not change the recipe): gradient checkpointing only when VRAM < 22 GB,
           # fused SDPA attention, bigger batch for forward-only validation
           'grad_ckpt': 'auto', 'attn': 'sdpa', 'eval_bs': 48,
+          # RawBoost the dev set once (fixed seed) for 'val loss w/ aug' instead of every epoch
+          'val_aug_cache': True,
           'eval_sets': [['ASVspoof2019 LA eval', 'asv19:test'], ['ITW', 'hfbench:InTheWild'],
                         ['DF eval-phase 10 shards', 'hfbench:ASVspoof2021_DF:10:eval']]},
     # C: frozen-feature back-end ablations

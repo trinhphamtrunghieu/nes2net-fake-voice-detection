@@ -37,6 +37,72 @@ def _loader(items, bs, algo=0, shuffle=False, workers=4, full=False, drop_last=F
                       persistent_workers=workers > 0, **extra)
 
 
+class _SeededAug(torch.utils.data.Dataset):
+    """WaveDataset item i with RawBoost seeded by (seed, i): the same augmented copy every time."""
+
+    def __init__(self, items, algo, seed):
+        self.ds, self.seed = WaveDataset(items, algo=algo), seed
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, i):
+        np.random.seed((self.seed * 1_000_003 + i) % 2**32)
+        x, y, _ = self.ds[i]
+        return x, y, i
+
+
+class CachedWaves(torch.utils.data.Dataset):
+    """Fixed-length waves stored in one float32 memmap (N, cut) + labels/keys."""
+
+    def __init__(self, cache_dir):
+        meta = json.load(open(os.path.join(cache_dir, 'meta.json')))
+        self.keys, self.labels = meta['keys'], meta['labels']
+        self.x = np.load(os.path.join(cache_dir, 'waves.npy'), mmap_mode='r')
+
+    def __len__(self):
+        return len(self.keys)
+
+    def __getitem__(self, i):
+        return torch.from_numpy(np.array(self.x[i], dtype=np.float32)), self.labels[i], self.keys[i]
+
+
+def build_aug_cache(items, cache_dir, algo=4, seed=0, workers=4, log=print):
+    """RawBoost every dev utterance ONCE (seeded per item) and store the 4 s windows, so the
+    'val loss w/ aug' pass reads a file instead of re-running RawBoost on the CPU every epoch.
+    Same items/algo/seed -> reused; an interrupted build is redone."""
+    from .data import CUT
+    sig = {'n': len(items), 'algo': algo, 'seed': seed, 'cut': CUT,
+           'first': items[0].key if items else None, 'last': items[-1].key if items else None}
+    done = os.path.join(cache_dir, 'DONE')
+    if os.path.exists(done):
+        try:
+            if json.load(open(done)) == sig:
+                return cache_dir
+        except Exception:
+            pass
+    os.makedirs(cache_dir, exist_ok=True)
+    if os.path.exists(done):
+        os.remove(done)
+    t0 = time.time()
+    x = np.lib.format.open_memmap(os.path.join(cache_dir, 'waves.npy'), mode='w+', dtype=np.float32,
+                                  shape=(len(items), CUT))
+    extra = {'prefetch_factor': 4} if workers > 0 else {}
+    dl = DataLoader(_SeededAug(items, algo, seed), batch_size=32, num_workers=workers, **extra)
+    n = 0
+    for xb, _, idx in dl:
+        x[idx.numpy()] = xb.numpy()
+        n += len(idx)
+        if n % 3200 < 32:
+            log(f'dev aug cache: {n}/{len(items)} ({(time.time() - t0) / 60:.1f} min)')
+    x.flush(); del x
+    json.dump({'keys': [it.key for it in items], 'labels': [int(it.label) for it in items]},
+              open(os.path.join(cache_dir, 'meta.json'), 'w'))
+    json.dump(sig, open(done, 'w'))
+    log(f'dev aug cache ready: {len(items)} utts in {(time.time() - t0) / 60:.1f} min -> {cache_dir}')
+    return cache_dir
+
+
 @torch.no_grad()
 def score(model, items: Sequence[Item], bs=32, device='cuda', full=False, workers=4,
           amp=True, desc='score'):
@@ -140,7 +206,8 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
           algo=4, val_aug=True, device='cuda', amp=True, accum=1, workers=4,
           time_budget_h: float | None = None, log=None, resume: bool = True,
           keep_best_k: int | None = None, save_every_steps: int | None = None,
-          log_every: int = 50, tb: bool = True, eval_bs: int | None = None):
+          log_every: int = 50, tb: bool = True, eval_bs: int | None = None,
+          val_aug_cache: str | None = None, val_aug_seed: int = 0):
     """Official recipe: Adam(lr, wd=1e-4), weighted CE, RawBoost on train; keep a checkpoint
     whenever val loss (w/ or w/o aug) improves. Returns history list.
 
@@ -149,6 +216,9 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
       save_every_steps=N   also refresh last_state.pth every N steps inside an epoch; on resume the
                            interrupted epoch runs only its remaining steps (with a new shuffle)
       keep_best_k=K        delete epoch checkpoints outside the K best (saves disk / Drive quota)
+      val_aug_cache=DIR    RawBoost the dev set once (fixed per-utterance seed) and reuse it every epoch
+                           for "val loss w/ aug" instead of re-augmenting on the CPU (official code
+                           re-augments each epoch; on 2-CPU runtimes that pass took ~35 min)
 
     Logging (see nes2net/logutil.py): every ``log_every`` steps a line with loss, lr, throughput,
     data-loading share, GPU memory and epoch ETA -> console + out_dir/train.log; the same values
@@ -175,7 +245,13 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
     crit = weighted_ce(device)
     tr = _loader(train_items, bs, algo=algo, shuffle=True, workers=workers, drop_last=True)
     dv0 = _loader(dev_items, eval_bs, algo=0, workers=workers)
-    dv1 = _loader(dev_items, eval_bs, algo=algo, workers=workers) if val_aug and algo else None
+    if val_aug and algo and val_aug_cache:
+        build_aug_cache(dev_items, val_aug_cache, algo=algo, seed=val_aug_seed, workers=workers, log=log)
+        extra = {'prefetch_factor': 4} if workers > 0 else {}
+        dv1 = DataLoader(CachedWaves(val_aug_cache), batch_size=eval_bs, num_workers=workers,
+                         pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0, **extra)
+    else:
+        dv1 = _loader(dev_items, eval_bs, algo=algo, workers=workers) if val_aug and algo else None
     best0 = best1 = best_eer = math.inf
     hist, start_ep, start_step, carry = [], 1, 0, (0.0, 0)
     state_path = os.path.join(out_dir, 'last_state.pth')
