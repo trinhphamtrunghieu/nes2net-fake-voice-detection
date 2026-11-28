@@ -29,12 +29,38 @@ def weighted_ce(device):
     return nn.CrossEntropyLoss(weight=torch.tensor([0.1, 0.9], device=device))
 
 
-def _loader(items, bs, algo=0, shuffle=False, workers=4, full=False, drop_last=False):
+def _loader(items, bs, algo=0, shuffle=False, workers=4, full=False, drop_last=False, sampler=None):
     ds = WaveDataset(items, algo=algo, full=full)
     extra = {'prefetch_factor': 4} if workers > 0 else {}
-    return DataLoader(ds, batch_size=1 if full else bs, shuffle=shuffle, num_workers=workers,
-                      drop_last=drop_last, pin_memory=torch.cuda.is_available(),
+    return DataLoader(ds, batch_size=1 if full else bs, shuffle=shuffle and sampler is None, sampler=sampler,
+                      num_workers=workers, drop_last=drop_last, pin_memory=torch.cuda.is_available(),
                       persistent_workers=workers > 0, **extra)
+
+
+class EpochSampler(torch.utils.data.Sampler):
+    """Shuffle with a permutation that depends only on (seed, epoch), so a run resumed mid-epoch
+    continues the *same* order and skips exactly the samples already trained on.
+
+    ``set_epoch(ep, skip)`` must be called before iterating; ``skip`` counts samples, not batches.
+    The sampler is iterated in the main process, so this works with persistent DataLoader workers.
+    """
+
+    def __init__(self, n: int, seed: int):
+        self.n, self.seed, self.epoch, self.skip = n, int(seed), 1, 0
+
+    def set_epoch(self, epoch: int, skip: int = 0):
+        self.epoch, self.skip = int(epoch), int(skip)
+
+    def order(self, epoch: int):
+        g = torch.Generator()
+        g.manual_seed(self.seed * 100003 + epoch)
+        return torch.randperm(self.n, generator=g).tolist()
+
+    def __iter__(self):
+        return iter(self.order(self.epoch)[self.skip:])
+
+    def __len__(self):
+        return self.n - self.skip
 
 
 class _SeededAug(torch.utils.data.Dataset):
@@ -214,7 +240,8 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
     Extras for preemptible notebooks (Colab/Kaggle):
       resume=True          continue from ``out_dir/last_state.pth`` (model + Adam + scaler + history)
       save_every_steps=N   also refresh last_state.pth every N steps inside an epoch; on resume the
-                           interrupted epoch runs only its remaining steps (with a new shuffle)
+                           interrupted epoch continues the same (seed, epoch) shuffle and skips the
+                           batches already trained (states saved before this fix: new shuffle)
       keep_best_k=K        delete epoch checkpoints outside the K best (saves disk / Drive quota)
       val_aug_cache=DIR    RawBoost the dev set once (fixed per-utterance seed) and reuse it every epoch
                            for "val loss w/ aug" instead of re-augmenting on the CPU (official code
@@ -243,7 +270,10 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=wd)
     scaler = torch.amp.GradScaler('cuda', enabled=amp and device.startswith('cuda'))
     crit = weighted_ce(device)
-    tr = _loader(train_items, bs, algo=algo, shuffle=True, workers=workers, drop_last=True)
+    shuffle_seed = int(torch.randint(0, 2 ** 31 - 1, (1,)).item())      # follows the global torch seed
+    sampler = EpochSampler(len(train_items), shuffle_seed)
+    tr = _loader(train_items, bs, algo=algo, shuffle=True, workers=workers, drop_last=True, sampler=sampler)
+    steps = len(train_items) // bs                                      # full epoch, drop_last
     dv0 = _loader(dev_items, eval_bs, algo=0, workers=workers)
     if val_aug and algo and val_aug_cache:
         build_aug_cache(dev_items, val_aug_cache, algo=algo, seed=val_aug_seed, workers=workers, log=log)
@@ -254,13 +284,15 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
         dv1 = _loader(dev_items, eval_bs, algo=algo, workers=workers) if val_aug and algo else None
     best0 = best1 = best_eer = math.inf
     hist, start_ep, start_step, carry = [], 1, 0, (0.0, 0)
+    exact_resume = True
     state_path = os.path.join(out_dir, 'last_state.pth')
 
     def save_state(ep, step, run, n):
         tmp = state_path + '.tmp'
         torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'scaler': scaler.state_dict(),
                     'epoch': ep, 'step': step, 'run': run, 'n': n, 'best0': best0, 'best1': best1,
-                    'best_eer': best_eer, 'hist': hist, 'rng': torch.get_rng_state()}, tmp)
+                    'best_eer': best_eer, 'hist': hist, 'rng': torch.get_rng_state(),
+                    'shuffle_seed': sampler.seed}, tmp)
         os.replace(tmp, state_path)            # atomic: a disconnect never leaves a broken file
 
     if resume and os.path.exists(state_path):
@@ -268,21 +300,25 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
         model.load_state_dict(st['model']); opt.load_state_dict(st['opt']); scaler.load_state_dict(st['scaler'])
         best0, best1, best_eer, hist = st['best0'], st['best1'], st.get('best_eer', math.inf), st['hist']
         torch.set_rng_state(st['rng'])
+        exact = exact_resume = 'shuffle_seed' in st  # older states: no seed saved -> new shuffle for the rest
+        if exact:
+            sampler.seed = int(st['shuffle_seed'])
         if st['step'] == 0:                      # saved at end of epoch
             start_ep = st['epoch'] + 1
         else:                                    # saved mid-epoch
             start_ep, start_step, carry = st['epoch'], st['step'], (st['run'], st['n'])
-        log(f'resumed from {state_path}: epoch {start_ep}, step {start_step}')
+        log(f'resumed from {state_path}: epoch {start_ep}, step {start_step}'
+            + ('' if exact or not start_step else ' (state has no shuffle seed: remaining steps use a new shuffle)'))
         R.metric('resume', epoch=start_ep, step=start_step)
 
     n_par = sum(p.numel() for p in model.parameters())
     n_tr = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    log(f'start: epochs {start_ep}..{epochs}, {len(tr)} steps/epoch (bs {bs} x accum {accum}), '
+    log(f'start: epochs {start_ep}..{epochs}, {steps} steps/epoch (bs {bs} x accum {accum}), '
         f'train {len(train_items)} / dev {len(dev_items)} utts, lr {lr:g}, RawBoost algo {algo}, '
         f'params {n_par / 1e6:.1f}M ({n_tr / 1e6:.1f}M trainable), device {device}'
         f'{" (" + torch.cuda.get_device_name(0) + ")" if device.startswith("cuda") else ""}, amp {amp}, '
         f'workers {workers}, eval_bs {eval_bs}, grad_ckpt {_grad_ckpt_on(model)}, attn {_attn_impl(model)}')
-    R.metric('start', lr=lr, bs=bs, accum=accum, algo=algo, steps_per_epoch=len(tr), n_train=len(train_items),
+    R.metric('start', lr=lr, bs=bs, accum=accum, algo=algo, steps_per_epoch=steps, n_train=len(train_items),
              n_dev=len(dev_items), params_m=n_par / 1e6, trainable_m=n_tr / 1e6)
     t0 = time.time()
     out_of_time = lambda: bool(time_budget_h) and (time.time() - t0) / 3600 > time_budget_h
@@ -290,12 +326,13 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
         model.train(); te = time.time()
         run, n = carry if ep == start_ep else (0.0, 0)
         skip = start_step if ep == start_ep else 0
+        sampler.set_epoch(ep, skip * bs if exact_resume else 0)
         opt.zero_grad(set_to_none=True)
         stopped = False
         w_loss, w_n, w_data, w_t0 = 0.0, 0, 0.0, time.time()     # logging window
         t_fetch = time.time()
         for step, (x, y, _) in enumerate(tr, start=skip):
-            if step >= len(tr):
+            if step >= steps:
                 break
             w_data += time.time() - t_fetch                       # time spent waiting for the DataLoader
             x, y = x.to(device, non_blocking=True), torch.as_tensor(y).long().to(device)
@@ -314,7 +351,7 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
                 if device.startswith('cuda'):
                     torch.cuda.synchronize()
                 wt = time.time() - w_t0
-                done, total = step + 1, len(tr)
+                done, total = step + 1, steps
                 rate = (done - skip) / max(time.time() - te, 1e-9)
                 eta = (total - done) / max(rate, 1e-9)
                 m = dict(epoch=ep, step=done, steps=total, loss=w_loss / max(w_n, 1), loss_epoch=run / max(n, 1),
@@ -326,15 +363,15 @@ def train(model, train_items, dev_items, out_dir, epochs=100, lr=1e-6, wd=1e-4, 
                     f"gpu {m.get('gpu_mem_gb', 0):.1f}/{m.get('gpu_peak_gb', 0):.1f} GB | ETA ep {m['eta_epoch_min']:.1f} min")
                 R.metric('train_step', tb_step=(ep - 1) * total + done, **m)
                 w_loss, w_n, w_data, w_t0 = 0.0, 0, 0.0, time.time()
-            if save_every_steps and (step + 1) % save_every_steps == 0 and step + 1 < len(tr):
+            if save_every_steps and (step + 1) % save_every_steps == 0 and step + 1 < steps:
                 save_state(ep, step + 1, run, n)
                 R.metric('checkpoint', epoch=ep, step=step + 1, kind='last_state')
             if out_of_time():
                 save_state(ep, step + 1, run, n); stopped = True
                 break
             t_fetch = time.time()
-        if stopped and n and len(tr) - (step + 1) > 0:
-            log(f'time budget reached mid-epoch {ep} (step {step + 1}/{len(tr)}); state saved, rerun to resume')
+        if stopped and n and steps - (step + 1) > 0:
+            log(f'time budget reached mid-epoch {ep} (step {step + 1}/{steps}); state saved, rerun to resume')
             R.metric('stop', epoch=ep, step=step + 1, reason='time_budget'); R.close()
             return hist
         t_train = time.time() - te; tv = time.time()

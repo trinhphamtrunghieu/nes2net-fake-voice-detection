@@ -72,7 +72,7 @@ def test_resume_and_prune(tmp_path):
     # 1) stop mid-epoch through the time budget -> state saved with step > 0
     h = engine.train(_tiny_model(), items, items, out, epochs=3, time_budget_h=1e-9, **kw)
     st = torch.load(os.path.join(out, 'last_state.pth'), weights_only=False)
-    assert h == [] and st['epoch'] == 1 and st['step'] == 1
+    assert h == [] and st['epoch'] == 1 and st['step'] == 1 and 'shuffle_seed' in st
     # 2) resume: finishes epoch 1 (remaining steps) then epochs 2-3
     h = engine.train(_tiny_model(), items, items, out, epochs=3, **kw)
     assert [x['epoch'] for x in h] == [1, 2, 3]
@@ -111,3 +111,19 @@ def test_full_eval_shardwise(tmp_path, monkeypatch):
     res2 = full_eval.score_hfbench_full(m, 'X/Fake', out, device='cpu', bs=4, workers=0,
                                         shard_dir=str(tmp_path / 'sh'))      # resumable: nothing rescored
     assert res2['all_trials']['n'] == 16
+
+
+def test_epoch_sampler_exact_resume():
+    from torch.utils.data import DataLoader
+    s = engine.EpochSampler(23, seed=7)
+    full = s.order(3)
+    assert sorted(full) == list(range(23)) and full == engine.EpochSampler(23, 7).order(3)
+    assert full != s.order(4)                                     # reshuffled every epoch
+    s.set_epoch(3, skip=8)                                        # resumed after 2 batches of 4
+    assert list(s) == full[8:] and len(s) == 15
+    # through a DataLoader with drop_last: the resumed batches are exactly the remaining ones
+    dl = DataLoader(list(range(23)), batch_size=4, sampler=s, drop_last=True)
+    got = [i for b in dl for i in b.tolist()]
+    assert got == full[8:8 + 12]
+    s.set_epoch(4)
+    assert list(s) == s.order(4)
